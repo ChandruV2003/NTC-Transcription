@@ -1,0 +1,10 @@
+.git
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+data/
+runtime/
+.env
+*.log
+.DS_Store
