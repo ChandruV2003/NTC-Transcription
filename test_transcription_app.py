@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ntc_live_captions_app import create_app
+from ntc_transcription_app import create_app
 
 
 def _create_test_db(path: Path):
@@ -45,7 +45,7 @@ def _insert_segment(path: Path, room_slug: str, text: str, received_at: str = "2
         return int(cursor.lastrowid)
 
 
-class LiveCaptionsTests(unittest.TestCase):
+class TranscriptionTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.tempdir.name) / "ntccast.db"
@@ -54,8 +54,8 @@ class LiveCaptionsTests(unittest.TestCase):
             {
                 "TESTING": True,
                 "NTC_DB_PATH": str(self.db_path),
-                "NTC_LIVE_CAPTIONS_VISIBLE_ROOMS": "room-a,room-b",
-                "NTC_LIVE_CAPTIONS_DEFAULT_ROOM": "room-a",
+                "NTC_TRANSCRIPTION_VISIBLE_ROOMS": "room-a,room-b",
+                "NTC_TRANSCRIPTION_DEFAULT_ROOM": "room-a",
             }
         )
         self.client = self.app.test_client()
@@ -70,12 +70,12 @@ class LiveCaptionsTests(unittest.TestCase):
         self.assertTrue(response.get_json()["ok"])
 
     def test_public_page_is_transcript_only(self):
-        _insert_segment(self.db_path, "room-a", "Public caption line.")
+        _insert_segment(self.db_path, "room-a", "Public transcription line.")
 
         response = self.client.get("/transcribe")
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"Public caption line.", response.data)
+        self.assertIn(b"Public transcription line.", response.data)
         self.assertIn(b"background: #000", response.data)
         self.assertIn(b"/api/public/transcribe/", response.data)
         self.assertNotIn(b"Translation Settings", response.data)
@@ -93,6 +93,17 @@ class LiveCaptionsTests(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(payload["room_slug"], "room-a")
         self.assertEqual([segment["text"] for segment in payload["segments"]], ["Second line."])
+
+    def test_internal_api_returns_segments_for_translator(self):
+        first_id = _insert_segment(self.db_path, "room-a", "First internal line.")
+        _insert_segment(self.db_path, "room-a", "Second internal line.")
+
+        response = self.client.get(f"/api/internal/transcription/room-a/segments?after_id={first_id}")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["room_slug"], "room-a")
+        self.assertEqual([segment["text"] for segment in payload["segments"]], ["Second internal line."])
 
     def test_public_api_hides_internal_segment_fields(self):
         _insert_segment(self.db_path, "room-a", "Visible text.")

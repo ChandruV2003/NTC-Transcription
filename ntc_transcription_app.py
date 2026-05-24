@@ -1,4 +1,4 @@
-"""Public read-only live caption display for NTC."""
+"""Public read-only transcription display for NTC."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def _csv_tuple(value: str, default: tuple[str, ...]) -> tuple[str, ...]:
     return items or default
 
 
-class CaptionStore:
+class TranscriptionStore:
     def __init__(self, db_path: str | None):
         self.db_path = Path(db_path or "/app/data/ntccast.db")
 
@@ -97,32 +97,32 @@ def _segment_payload(row: sqlite3.Row) -> dict:
     }
 
 
-def create_app(test_config: dict | None = None, *, store: CaptionStore | None = None) -> Flask:
+def create_app(test_config: dict | None = None, *, store: TranscriptionStore | None = None) -> Flask:
     app = Flask(__name__)
     app.config.update(
         NTC_DB_PATH=os.getenv("NTC_DB_PATH", "/app/data/ntccast.db"),
-        NTC_LIVE_CAPTIONS_TITLE=os.getenv("NTC_LIVE_CAPTIONS_TITLE", "NTC Live Captions"),
-        NTC_LIVE_CAPTIONS_DEFAULT_ROOM=os.getenv("NTC_LIVE_CAPTIONS_DEFAULT_ROOM", "room-a"),
-        NTC_LIVE_CAPTIONS_VISIBLE_ROOMS=os.getenv("NTC_LIVE_CAPTIONS_VISIBLE_ROOMS", "room-a,room-b"),
-        NTC_LIVE_CAPTIONS_POLL_MS=int(os.getenv("NTC_LIVE_CAPTIONS_POLL_MS", "1000")),
-        NTC_LIVE_CAPTIONS_INITIAL_LINES=int(os.getenv("NTC_LIVE_CAPTIONS_INITIAL_LINES", "30")),
-        NTC_LIVE_CAPTIONS_API_LINES=int(os.getenv("NTC_LIVE_CAPTIONS_API_LINES", "80")),
-        NTC_LIVE_CAPTIONS_RENDER_LINES=int(os.getenv("NTC_LIVE_CAPTIONS_RENDER_LINES", "18")),
+        NTC_TRANSCRIPTION_TITLE=os.getenv("NTC_TRANSCRIPTION_TITLE", "NTC Transcription"),
+        NTC_TRANSCRIPTION_DEFAULT_ROOM=os.getenv("NTC_TRANSCRIPTION_DEFAULT_ROOM", "room-a"),
+        NTC_TRANSCRIPTION_VISIBLE_ROOMS=os.getenv("NTC_TRANSCRIPTION_VISIBLE_ROOMS", "room-a,room-b"),
+        NTC_TRANSCRIPTION_POLL_MS=int(os.getenv("NTC_TRANSCRIPTION_POLL_MS", "1000")),
+        NTC_TRANSCRIPTION_INITIAL_LINES=int(os.getenv("NTC_TRANSCRIPTION_INITIAL_LINES", "30")),
+        NTC_TRANSCRIPTION_API_LINES=int(os.getenv("NTC_TRANSCRIPTION_API_LINES", "80")),
+        NTC_TRANSCRIPTION_RENDER_LINES=int(os.getenv("NTC_TRANSCRIPTION_RENDER_LINES", "18")),
     )
     if test_config:
         app.config.update(test_config)
 
-    caption_store = store or CaptionStore(app.config["NTC_DB_PATH"])
-    app.caption_store = caption_store
+    transcription_store = store or TranscriptionStore(app.config["NTC_DB_PATH"])
+    app.transcription_store = transcription_store
 
     def _visible_rooms() -> tuple[str, ...]:
-        return _csv_tuple(app.config.get("NTC_LIVE_CAPTIONS_VISIBLE_ROOMS", ""), DEFAULT_VISIBLE_ROOM_SLUGS)
+        return _csv_tuple(app.config.get("NTC_TRANSCRIPTION_VISIBLE_ROOMS", ""), DEFAULT_VISIBLE_ROOM_SLUGS)
 
     def _room_or_404(room_slug: str):
         canonical = _canonical_room_slug(room_slug)
         if canonical not in _visible_rooms():
             return None
-        return caption_store.get_room(canonical)
+        return transcription_store.get_room(canonical)
 
     @app.after_request
     def no_store(response):
@@ -132,10 +132,10 @@ def create_app(test_config: dict | None = None, *, store: CaptionStore | None = 
     @app.get("/healthz")
     def healthz():
         try:
-            caption_store.health()
+            transcription_store.health()
             return jsonify({"ok": True, "timestamp": datetime.now(timezone.utc).isoformat()})
         except Exception as exc:  # pragma: no cover - defensive runtime guard
-            app.logger.exception("live captions health check failed")
+            app.logger.exception("transcription health check failed")
             return jsonify({"ok": False, "error": str(exc)}), 500
 
     @app.get("/")
@@ -148,24 +148,24 @@ def create_app(test_config: dict | None = None, *, store: CaptionStore | None = 
             return jsonify({"error": "unknown room"}), 404
         recent_segments = list(
             reversed(
-                caption_store.list_recent_segments(
+                transcription_store.list_recent_segments(
                     room["slug"],
-                    limit=app.config["NTC_LIVE_CAPTIONS_INITIAL_LINES"],
+                    limit=app.config["NTC_TRANSCRIPTION_INITIAL_LINES"],
                 )
             )
         )
         return render_template_string(
             PUBLIC_TRANSCRIBE_TEMPLATE,
-            title=app.config["NTC_LIVE_CAPTIONS_TITLE"],
+            title=app.config["NTC_TRANSCRIPTION_TITLE"],
             room=room,
             segments=recent_segments,
-            poll_ms=app.config["NTC_LIVE_CAPTIONS_POLL_MS"],
-            render_lines=app.config["NTC_LIVE_CAPTIONS_RENDER_LINES"],
+            poll_ms=app.config["NTC_TRANSCRIPTION_POLL_MS"],
+            render_lines=app.config["NTC_TRANSCRIPTION_RENDER_LINES"],
         )
 
     @app.get("/transcribe")
     def public_transcribe():
-        return _render_public_transcription(app.config["NTC_LIVE_CAPTIONS_DEFAULT_ROOM"])
+        return _render_public_transcription(app.config["NTC_TRANSCRIPTION_DEFAULT_ROOM"])
 
     @app.get("/transcribe/<room_slug>")
     def public_transcribe_room(room_slug: str):
@@ -173,6 +173,13 @@ def create_app(test_config: dict | None = None, *, store: CaptionStore | None = 
 
     @app.get("/api/public/transcribe/<room_slug>/segments")
     def public_transcribe_segments(room_slug: str):
+        return _segments_response(room_slug)
+
+    @app.get("/api/internal/transcription/<room_slug>/segments")
+    def internal_transcription_segments(room_slug: str):
+        return _segments_response(room_slug)
+
+    def _segments_response(room_slug: str):
         room = _room_or_404(room_slug)
         if not room:
             return jsonify({"error": "unknown room"}), 404
@@ -180,13 +187,13 @@ def create_app(test_config: dict | None = None, *, store: CaptionStore | None = 
             after_id = int(request.args.get("after_id", "0") or "0")
         except ValueError:
             after_id = 0
-        limit = app.config["NTC_LIVE_CAPTIONS_API_LINES"]
-        recent_segments = caption_store.list_recent_segments(room["slug"], limit=limit)
+        limit = app.config["NTC_TRANSCRIPTION_API_LINES"]
+        recent_segments = transcription_store.list_recent_segments(room["slug"], limit=limit)
         recent_floor_id = min((int(segment["id"]) for segment in recent_segments), default=0)
         if after_id <= 0 or (recent_floor_id and after_id < recent_floor_id):
             segments = list(reversed(recent_segments))
         else:
-            segments = caption_store.list_segments_after(room["slug"], after_id=after_id, limit=limit)
+            segments = transcription_store.list_segments_after(room["slug"], after_id=after_id, limit=limit)
         return jsonify({"room_slug": room["slug"], "segments": segments})
 
     return app
@@ -309,6 +316,6 @@ app = create_app()
 
 
 if __name__ == "__main__":
-    host = os.getenv("NTC_LIVE_CAPTIONS_HOST", "0.0.0.0")
-    port = int(os.getenv("NTC_LIVE_CAPTIONS_PORT", "1975"))
+    host = os.getenv("NTC_TRANSCRIPTION_HOST", "0.0.0.0")
+    port = int(os.getenv("NTC_TRANSCRIPTION_PORT", "1975"))
     app.run(host=host, port=port)
