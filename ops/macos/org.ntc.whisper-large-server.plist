@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>org.ntc.whisper-large-server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>/Users/c.s.d.v.r.s./Developer/NTC-Transcription/tools/whisper_large_server.py</string>
+    <string>--host</string>
+    <string>0.0.0.0</string>
+    <string>--port</string>
+    <string>8766</string>
+    <string>--model</string>
+    <string>openai/whisper-large-v3</string>
+    <string>--device</string>
+    <string>cpu</string>
+    <string>--quiet</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/c.s.d.v.r.s./Developer/NTC-Transcription</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/c.s.d.v.r.s./Library/Logs/NTC/whisper-large-server.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/c.s.d.v.r.s./Library/Logs/NTC/whisper-large-server.err.log</string>
+</dict>
+</plist>

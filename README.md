@@ -27,3 +27,21 @@ This service is intentionally separate from WebCall and the internal Translator 
 python3 -m py_compile ntc_transcription_app.py
 python3 -m unittest test_transcription_app.py
 ```
+
+## Local Whisper Worker
+
+The M4 Mac mini can run a separate high-accuracy local Whisper endpoint for
+WebCall audio chunks:
+
+```bash
+python3 tools/whisper_large_server.py \
+  --host 0.0.0.0 \
+  --port 8766 \
+  --model openai/whisper-large-v3 \
+  --device cpu \
+  --quiet
+```
+
+The endpoint implements the same bridge contract as the lightweight local
+worker: `POST /transcribe` with an `audio/wav` body returns JSON containing a
+`text` field.
