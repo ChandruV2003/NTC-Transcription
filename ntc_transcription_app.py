@@ -274,7 +274,8 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
         let lastId = 0;
 
         function normalizeText(text) {
-          return String(text || "").replace(/\s+/g, " ").trim();
+          const normalized = String(text || "").replace(/\s+/g, " ").trim();
+          return /[A-Za-z0-9\u00c0-\uffff]/.test(normalized) ? normalized : "";
         }
 
         function sentenceEnded(text) {
@@ -284,9 +285,10 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
         function addSegment(segment) {
           const id = String(segment.id || "");
           const text = normalizeText(segment.text);
-          if (!id || !text || seen.has(id)) return false;
+          if (!id || seen.has(id)) return false;
           seen.add(id);
           lastId = Math.max(lastId, Number(id));
+          if (!text) return false;
           segments.push({ id, text });
           return true;
         }
