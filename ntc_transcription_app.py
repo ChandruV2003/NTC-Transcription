@@ -219,28 +219,30 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
         min-height: 100vh;
         display: flex;
         align-items: flex-end;
-        padding: clamp(24px, 5vw, 76px);
+        width: 100vw;
+        padding: clamp(14px, 2.6vw, 42px);
       }
       .transcript {
-        width: min(100%, 1260px);
+        width: 100%;
         display: grid;
-        gap: clamp(14px, 2vw, 28px);
+        gap: clamp(18px, 2.2vw, 34px);
       }
-      .line,
+      .block,
       .empty {
         margin: 0;
         color: #fff;
-        font-size: clamp(32px, 5.6vw, 78px);
+        font-size: clamp(34px, 5.2vw, 88px);
         font-weight: 850;
-        line-height: 1.12;
+        line-height: 1.1;
         letter-spacing: 0;
         overflow-wrap: anywhere;
+        text-wrap: pretty;
       }
-      .line:not(:last-child) { opacity: 0.62; }
+      .block:not(:last-child) { opacity: 0.6; }
       .empty { opacity: 0.72; }
       @media (max-width: 720px) {
-        main { padding: 22px; }
-        .line,
+        main { padding: 16px; }
+        .block,
         .empty { font-size: clamp(28px, 11vw, 58px); }
       }
     </style>
@@ -255,14 +257,9 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
         data-poll-ms="{{ poll_ms }}"
         data-render-lines="{{ render_lines }}"
       >
-        {% if segments %}
-          {% for segment in segments %}
-            <p class="line" data-segment-id="{{ segment.id }}">{{ segment.text }}</p>
-          {% endfor %}
-        {% else %}
-          <p class="empty" id="empty-state">Waiting for transcription.</p>
-        {% endif %}
+        <p class="empty" id="empty-state">Waiting for transcription.</p>
       </section>
+      <script id="initial-segments" type="application/json">{{ segments|tojson }}</script>
     </main>
     <script>
       (() => {
@@ -270,26 +267,79 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
         if (!transcript) return;
         const roomSlug = transcript.dataset.roomSlug;
         const pollMs = Number(transcript.dataset.pollMs || "1000");
-        const renderLines = Math.max(1, Number(transcript.dataset.renderLines || "18"));
-        const seen = new Set([...transcript.querySelectorAll("[data-segment-id]")].map((node) => node.dataset.segmentId));
-        let lastId = Math.max(0, ...[...transcript.querySelectorAll("[data-segment-id]")].map((node) => Number(node.dataset.segmentId || "0")));
+        const renderBlocks = Math.max(1, Math.ceil(Number(transcript.dataset.renderLines || "18") / 3));
+        const initialSegments = JSON.parse(document.getElementById("initial-segments")?.textContent || "[]");
+        const segments = [];
+        const seen = new Set();
+        let lastId = 0;
 
-        function appendSegment(segment) {
+        function normalizeText(text) {
+          return String(text || "").replace(/\s+/g, " ").trim();
+        }
+
+        function sentenceEnded(text) {
+          return /[.!?]["')\]]?$/.test(text.trim());
+        }
+
+        function addSegment(segment) {
           const id = String(segment.id || "");
-          const text = String(segment.text || "").trim();
-          if (!id || !text || seen.has(id)) return;
+          const text = normalizeText(segment.text);
+          if (!id || !text || seen.has(id)) return false;
           seen.add(id);
           lastId = Math.max(lastId, Number(id));
-          document.getElementById("empty-state")?.remove();
-          const line = document.createElement("p");
-          line.className = "line";
-          line.dataset.segmentId = id;
-          line.textContent = text;
-          transcript.appendChild(line);
-          while (transcript.querySelectorAll(".line").length > renderLines) {
-            transcript.querySelector(".line")?.remove();
+          segments.push({ id, text });
+          return true;
+        }
+
+        function buildBlocks() {
+          const blocks = [];
+          let current = [];
+          let currentLength = 0;
+          for (const segment of segments) {
+            const nextLength = currentLength + (currentLength ? 1 : 0) + segment.text.length;
+            const shouldStartBlock = current.length > 0 && (
+              nextLength > 620 ||
+              current.length >= 5 ||
+              (currentLength >= 260 && sentenceEnded(current[current.length - 1].text))
+            );
+            if (shouldStartBlock) {
+              blocks.push(current);
+              current = [];
+              currentLength = 0;
+            }
+            current.push(segment);
+            currentLength += (currentLength ? 1 : 0) + segment.text.length;
+          }
+          if (current.length) blocks.push(current);
+          return blocks.slice(-renderBlocks);
+        }
+
+        function render() {
+          const blocks = buildBlocks();
+          transcript.replaceChildren();
+          if (!blocks.length) {
+            const empty = document.createElement("p");
+            empty.className = "empty";
+            empty.id = "empty-state";
+            empty.textContent = "Waiting for transcription.";
+            transcript.appendChild(empty);
+            return;
+          }
+          for (const blockSegments of blocks) {
+            const block = document.createElement("p");
+            block.className = "block";
+            block.dataset.segmentIds = blockSegments.map((segment) => segment.id).join(",");
+            block.textContent = blockSegments.map((segment) => segment.text).join(" ");
+            transcript.appendChild(block);
           }
           window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+        }
+
+        for (const segment of initialSegments) addSegment(segment);
+        render();
+
+        function appendSegment(segment) {
+          if (addSegment(segment)) render();
         }
 
         async function poll() {
