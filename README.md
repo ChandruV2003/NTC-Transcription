@@ -14,12 +14,12 @@ This service is intentionally separate from WebCall and the internal Translator 
 ## Endpoints
 
 - `/healthz`
-- `/transcribe`
-- `/transcribe/<room-slug>`
-- `/api/public/transcribe/<room-slug>/segments`
+- `/transcription`
+- `/transcription/<room-slug>`
+- `/api/public/transcription/<room-slug>/segments`
 - `/api/internal/transcription/<room-slug>/segments`
 
-`/transcribe` defaults to Room A. The APIs return only the recent live transcription window and are not transcript archives. The internal API is for the `NTC-Translator` container to read current transcript text over the Docker network.
+`/transcription` defaults to Room A. The legacy `/transcribe` page URLs redirect to `/transcription`, and the legacy public API path remains available as a compatibility alias. The APIs return only the recent live transcription window and are not transcript archives. The internal API is for the `NTC-Translator` container to read current transcript text over the Docker network.
 
 ## Local Validation
 
@@ -43,5 +43,5 @@ python3 tools/whisper_large_server.py \
 ```
 
 The endpoint implements the same bridge contract as the lightweight local
-worker: `POST /transcribe` with an `audio/wav` body returns JSON containing a
-`text` field.
+worker: `POST /transcription` with an `audio/wav` body returns JSON containing a
+`text` field. `POST /transcribe` is accepted as a compatibility alias.

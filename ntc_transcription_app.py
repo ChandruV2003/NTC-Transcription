@@ -140,7 +140,7 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
 
     @app.get("/")
     def index():
-        return redirect(url_for("public_transcribe"))
+        return redirect(url_for("public_transcription"))
 
     def _render_public_transcription(room_slug: str):
         room = _room_or_404(room_slug)
@@ -163,16 +163,25 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
             render_lines=app.config["NTC_TRANSCRIPTION_RENDER_LINES"],
         )
 
-    @app.get("/transcribe")
-    def public_transcribe():
+    @app.get("/transcription")
+    def public_transcription():
         return _render_public_transcription(app.config["NTC_TRANSCRIPTION_DEFAULT_ROOM"])
 
-    @app.get("/transcribe/<room_slug>")
-    def public_transcribe_room(room_slug: str):
+    @app.get("/transcription/<room_slug>")
+    def public_transcription_room(room_slug: str):
         return _render_public_transcription(room_slug)
 
+    @app.get("/transcribe")
+    def legacy_public_transcribe():
+        return redirect(url_for("public_transcription"), code=308)
+
+    @app.get("/transcribe/<room_slug>")
+    def legacy_public_transcribe_room(room_slug: str):
+        return redirect(url_for("public_transcription_room", room_slug=room_slug), code=308)
+
+    @app.get("/api/public/transcription/<room_slug>/segments")
     @app.get("/api/public/transcribe/<room_slug>/segments")
-    def public_transcribe_segments(room_slug: str):
+    def public_transcription_segments(room_slug: str):
         return _segments_response(room_slug)
 
     @app.get("/api/internal/transcription/<room_slug>/segments")
@@ -346,7 +355,7 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
 
         async function poll() {
           try {
-            const response = await fetch(`/api/public/transcribe/${encodeURIComponent(roomSlug)}/segments?after_id=${lastId}`, { cache: "no-store" });
+            const response = await fetch(`/api/public/transcription/${encodeURIComponent(roomSlug)}/segments?after_id=${lastId}`, { cache: "no-store" });
             if (response.ok) {
               const payload = await response.json();
               for (const segment of payload.segments || []) appendSegment(segment);

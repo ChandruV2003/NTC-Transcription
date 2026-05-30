@@ -2,7 +2,8 @@
 """Persistent local Whisper HTTP bridge for NTC transcription.
 
 This is intended to run on the M4 Mac mini. WebCall posts WAV chunks to
-``/transcribe`` and receives JSON: ``{"text": "..."}``.
+``/transcription`` and receives JSON: ``{"text": "..."}``. ``/transcribe``
+is kept as a compatibility alias.
 """
 
 from __future__ import annotations
@@ -143,7 +144,7 @@ class WhisperHandler(BaseHTTPRequestHandler):
         )
 
     def do_POST(self):  # noqa: N802
-        if urlsplit(self.path).path != "/transcribe":
+        if urlsplit(self.path).path not in {"/transcription", "/transcribe"}:
             self.send_error(404)
             return
         content_length = int(self.headers.get("Content-Length") or "0")
@@ -213,7 +214,7 @@ def main() -> int:
         quiet=args.quiet,
     )
     print(
-        f"NTC Whisper listening on http://{args.host}:{args.port}/transcribe "
+        f"NTC Whisper listening on http://{args.host}:{args.port}/transcription "
         f"model={args.model} device={args.device}",
         flush=True,
     )

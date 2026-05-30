@@ -72,7 +72,7 @@ class TranscriptionTests(unittest.TestCase):
     def test_public_page_is_transcript_only(self):
         _insert_segment(self.db_path, "room-a", "Public transcription line.")
 
-        response = self.client.get("/transcribe")
+        response = self.client.get("/transcription")
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Public transcription line.", response.data)
@@ -80,7 +80,7 @@ class TranscriptionTests(unittest.TestCase):
         self.assertIn(b"width: 100%;", response.data)
         self.assertIn(b"initial-segments", response.data)
         self.assertIn(b"className = \"block\"", response.data)
-        self.assertIn(b"/api/public/transcribe/", response.data)
+        self.assertIn(b"/api/public/transcription/", response.data)
         self.assertNotIn(b"1260px", response.data)
         self.assertNotIn(b"class=\"line\"", response.data)
         self.assertNotIn(b"Translation Settings", response.data)
@@ -92,7 +92,7 @@ class TranscriptionTests(unittest.TestCase):
         first_id = _insert_segment(self.db_path, "room-a", "First line.")
         _insert_segment(self.db_path, "room-a", "Second line.")
 
-        response = self.client.get(f"/api/public/transcribe/room-a/segments?after_id={first_id}")
+        response = self.client.get(f"/api/public/transcription/room-a/segments?after_id={first_id}")
 
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
@@ -113,7 +113,7 @@ class TranscriptionTests(unittest.TestCase):
     def test_public_api_hides_internal_segment_fields(self):
         _insert_segment(self.db_path, "room-a", "Visible text.")
 
-        response = self.client.get("/api/public/transcribe/room-a/segments")
+        response = self.client.get("/api/public/transcription/room-a/segments")
 
         self.assertEqual(response.status_code, 200)
         segment = response.get_json()["segments"][0]
@@ -126,7 +126,7 @@ class TranscriptionTests(unittest.TestCase):
         for index in range(85):
             _insert_segment(self.db_path, "room-a", f"Public line {index}.")
 
-        response = self.client.get("/api/public/transcribe/room-a/segments?after_id=1")
+        response = self.client.get("/api/public/transcription/room-a/segments?after_id=1")
 
         self.assertEqual(response.status_code, 200)
         texts = [segment["text"] for segment in response.get_json()["segments"]]
@@ -135,11 +135,17 @@ class TranscriptionTests(unittest.TestCase):
         self.assertEqual(texts[-1], "Public line 84.")
 
     def test_unknown_and_hidden_rooms_return_404(self):
-        hidden = self.client.get("/transcribe/diagnostics")
-        missing = self.client.get("/transcribe/not-a-room")
+        hidden = self.client.get("/transcription/diagnostics")
+        missing = self.client.get("/transcription/not-a-room")
 
         self.assertEqual(hidden.status_code, 404)
         self.assertEqual(missing.status_code, 404)
+
+    def test_legacy_transcribe_page_redirects_to_transcription(self):
+        response = self.client.get("/transcribe/room-a")
+
+        self.assertEqual(response.status_code, 308)
+        self.assertEqual(response.headers["Location"], "/transcription/room-a")
 
 
 if __name__ == "__main__":
