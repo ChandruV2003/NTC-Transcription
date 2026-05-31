@@ -1,9 +1,15 @@
 import sqlite3
 import tempfile
 import unittest
+from base64 import b64encode
 from pathlib import Path
 
 from ntc_transcription_app import create_app
+
+
+def _basic_auth(password: str = "settings-password"):
+    token = b64encode(f"admin:{password}".encode("utf-8")).decode("ascii")
+    return {"Authorization": f"Basic {token}"}
 
 
 def _create_test_db(path: Path):
@@ -12,7 +18,51 @@ def _create_test_db(path: Path):
             """
             CREATE TABLE rooms (
                 slug TEXT PRIMARY KEY,
-                label TEXT NOT NULL
+                label TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                transcription_enabled INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE hosts (
+                slug TEXT PRIMARY KEY,
+                label TEXT NOT NULL,
+                room_slug TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                manual_mode TEXT NOT NULL DEFAULT 'auto',
+                translation_output_enabled INTEGER NOT NULL DEFAULT 0,
+                translation_target_language TEXT NOT NULL DEFAULT 'zh-CN',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE source_runtime (
+                host_slug TEXT PRIMARY KEY,
+                desired_active INTEGER NOT NULL DEFAULT 0,
+                is_ingesting INTEGER NOT NULL DEFAULT 0,
+                current_device TEXT NOT NULL DEFAULT '',
+                last_seen_at TEXT NOT NULL DEFAULT '',
+                last_error TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE room_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                room_slug TEXT,
+                host_slug TEXT,
+                component TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                level TEXT NOT NULL,
+                message TEXT NOT NULL,
+                details_json TEXT NOT NULL DEFAULT '{}',
+                occurred_at TEXT NOT NULL
             )
             """
         )
@@ -28,8 +78,33 @@ def _create_test_db(path: Path):
             """
         )
         connection.executemany(
-            "INSERT INTO rooms (slug, label) VALUES (?, ?)",
+            "INSERT INTO rooms (slug, label, enabled, transcription_enabled, updated_at) VALUES (?, ?, 1, 0, '')",
             [("room-a", "Room A"), ("room-b", "Room B"), ("diagnostics", "Diagnostics")],
+        )
+        connection.executemany(
+            """
+            INSERT INTO hosts (
+                slug, label, room_slug, enabled, manual_mode, translation_output_enabled,
+                translation_target_language, updated_at
+            )
+            VALUES (?, ?, ?, 1, 'auto', ?, 'zh-CN', '')
+            """,
+            [
+                ("hp-envy-16-ad0xx", "HP Envy", "room-a", 0),
+                ("hp-pavilion-14m-ba1xx", "HP Pavilion", "room-b", 0),
+            ],
+        )
+        connection.executemany(
+            """
+            INSERT INTO source_runtime (
+                host_slug, desired_active, is_ingesting, current_device, last_seen_at, last_error
+            )
+            VALUES (?, ?, ?, ?, ?, '')
+            """,
+            [
+                ("hp-envy-16-ad0xx", 0, 0, "SQ 1&2", "2026-05-31T12:00:00+00:00"),
+                ("hp-pavilion-14m-ba1xx", 0, 0, "SQ 3&4", "2026-05-31T12:00:00+00:00"),
+            ],
         )
 
 
@@ -56,6 +131,7 @@ class TranscriptionTests(unittest.TestCase):
                 "NTC_DB_PATH": str(self.db_path),
                 "NTC_TRANSCRIPTION_VISIBLE_ROOMS": "room-a,room-b",
                 "NTC_TRANSCRIPTION_DEFAULT_ROOM": "room-a",
+                "NTC_TRANSCRIPTION_SETTINGS_PASSWORD": "settings-password",
             }
         )
         self.client = self.app.test_client()
@@ -87,6 +163,81 @@ class TranscriptionTests(unittest.TestCase):
         self.assertNotIn(b"Live Caption Ingest", response.data)
         self.assertNotIn(b"Meeting live", response.data)
         self.assertNotIn(b"active_rooms", response.data)
+
+    def test_settings_requires_authentication(self):
+        response = self.client.get("/transcription/settings")
+
+        self.assertEqual(response.status_code, 401)
+        self.assertIn("Basic", response.headers["WWW-Authenticate"])
+
+    def test_settings_panel_shows_room_controls_and_stats(self):
+        _insert_segment(self.db_path, "room-a", "Recent settings transcript.", received_at="2999-01-01T00:00:00+00:00")
+
+        response = self.client.get("/transcription/settings?room=room-a", headers=_basic_auth())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Transcription Settings", response.data)
+        self.assertIn(b"Source Transcription", response.data)
+        self.assertIn(b"Translation Output", response.data)
+        self.assertIn(b"Recent Transcription Stats", response.data)
+        self.assertIn(b"segments in", response.data)
+        self.assertIn(b"WebCall stays separate", response.data)
+
+    def test_settings_can_toggle_room_transcription(self):
+        enabled = self.client.post(
+            "/transcription/settings/rooms/room-a/transcription",
+            data={"transcription_enabled": "1"},
+            headers=_basic_auth(),
+            follow_redirects=True,
+        )
+
+        self.assertEqual(enabled.status_code, 200)
+        with sqlite3.connect(self.db_path) as connection:
+            self.assertEqual(
+                connection.execute("SELECT transcription_enabled FROM rooms WHERE slug = 'room-a'").fetchone()[0],
+                1,
+            )
+
+        disabled = self.client.post(
+            "/transcription/settings/rooms/room-a/transcription",
+            data={"transcription_enabled": "0"},
+            headers=_basic_auth(),
+            follow_redirects=True,
+        )
+
+        self.assertEqual(disabled.status_code, 200)
+        with sqlite3.connect(self.db_path) as connection:
+            self.assertEqual(
+                connection.execute("SELECT transcription_enabled FROM rooms WHERE slug = 'room-a'").fetchone()[0],
+                0,
+            )
+
+    def test_settings_can_update_supported_translation_controls(self):
+        output = self.client.post(
+            "/transcription/settings/rooms/room-a/translation-output",
+            data={"translation_output_enabled": "1"},
+            headers=_basic_auth(),
+            follow_redirects=True,
+        )
+        language = self.client.post(
+            "/transcription/settings/rooms/room-a/translation-settings",
+            data={"target_language": "es"},
+            headers=_basic_auth(),
+            follow_redirects=True,
+        )
+
+        self.assertEqual(output.status_code, 200)
+        self.assertEqual(language.status_code, 200)
+        with sqlite3.connect(self.db_path) as connection:
+            row = connection.execute(
+                """
+                SELECT translation_output_enabled, translation_target_language
+                FROM hosts
+                WHERE slug = 'hp-envy-16-ad0xx'
+                """
+            ).fetchone()
+        self.assertEqual(row[0], 1)
+        self.assertEqual(row[1], "es")
 
     def test_public_api_returns_segments_after_id(self):
         first_id = _insert_segment(self.db_path, "room-a", "First line.")
