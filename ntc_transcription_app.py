@@ -1200,12 +1200,12 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
         let lastId = 0;
 
         function normalizeText(text) {
-          const normalized = String(text || "").replace(/\s+/g, " ").trim();
+          const normalized = String(text || "").replace(/\\s+/g, " ").trim();
           return /[A-Za-z0-9\u00c0-\uffff]/.test(normalized) ? normalized : "";
         }
 
         function sentenceEnded(text) {
-          return /[.!?]["')\]]?$/.test(text.trim());
+          return /[.!?]["')\\]]?$/.test(text.trim());
         }
 
         function addSegment(segment) {
