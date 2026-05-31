@@ -8,7 +8,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Flask, Response, jsonify, redirect, render_template_string, request, url_for
+from flask import Flask, jsonify, redirect, render_template_string, request, session, url_for
 
 
 ROOM_SLUG_ALIASES = {
@@ -277,6 +277,7 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
         NTC_TRANSCRIPTION_RENDER_LINES=int(os.getenv("NTC_TRANSCRIPTION_RENDER_LINES", "18")),
         NTC_TRANSCRIPTION_SETTINGS_AUTH_ENABLED=os.getenv("NTC_TRANSCRIPTION_SETTINGS_AUTH_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"},
         NTC_TRANSCRIPTION_SETTINGS_PASSWORD=os.getenv("NTC_TRANSCRIPTION_SETTINGS_PASSWORD", "") or os.getenv("NTC_ADMIN_PASSWORD", ""),
+        SECRET_KEY=os.getenv("NTC_SECRET_KEY", "change-me"),
     )
     if test_config:
         app.config.update(test_config)
@@ -296,22 +297,11 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
     def _settings_authorized() -> bool:
         if not app.config.get("NTC_TRANSCRIPTION_SETTINGS_AUTH_ENABLED", True):
             return True
-        expected = app.config.get("NTC_TRANSCRIPTION_SETTINGS_PASSWORD", "")
-        if not expected:
-            return False
-        auth = request.authorization
-        return bool(auth and hmac.compare_digest(auth.password or "", expected))
-
-    def _settings_auth_required():
-        return Response(
-            "Authentication required",
-            401,
-            {"WWW-Authenticate": 'Basic realm="NTC Transcription Settings"'},
-        )
+        return bool(session.get("ntc_transcription_settings"))
 
     def _require_settings_auth():
         if not _settings_authorized():
-            return _settings_auth_required()
+            return redirect(url_for("transcription_settings_login", next=request.full_path))
         return None
 
     @app.after_request
@@ -361,6 +351,40 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
     def public_transcription_room(room_slug: str):
         return _render_public_transcription(room_slug)
 
+    @app.get("/transcription/settings/login")
+    def transcription_settings_login():
+        if _settings_authorized():
+            return redirect(request.args.get("next") or url_for("transcription_settings"))
+        return render_template_string(
+            SETTINGS_LOGIN_TEMPLATE,
+            title=f"{app.config['NTC_TRANSCRIPTION_TITLE']} Settings",
+            error=request.args.get("error"),
+            next_url=request.args.get("next") or url_for("transcription_settings"),
+        )
+
+    @app.post("/transcription/settings/login")
+    def transcription_settings_login_post():
+        expected = app.config.get("NTC_TRANSCRIPTION_SETTINGS_PASSWORD", "")
+        if not expected:
+            return redirect(url_for("transcription_settings_login", error="Settings access is not configured yet."))
+        if not hmac.compare_digest(request.form.get("password", ""), expected):
+            return redirect(
+                url_for(
+                    "transcription_settings_login",
+                    next=request.form.get("next") or url_for("transcription_settings"),
+                    error="Password was not accepted.",
+                )
+            )
+        session["ntc_transcription_settings"] = True
+        session.modified = True
+        return redirect(request.form.get("next") or url_for("transcription_settings"))
+
+    @app.post("/transcription/settings/logout")
+    def transcription_settings_logout():
+        session.pop("ntc_transcription_settings", None)
+        session.modified = True
+        return redirect(url_for("transcription_settings_login"))
+
     @app.get("/transcription/settings")
     def transcription_settings():
         auth_response = _require_settings_auth()
@@ -376,6 +400,7 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
             selected=selected,
             language_options=TRANSLATION_LANGUAGE_OPTIONS,
             public_base=url_for("public_transcription"),
+            logout_url=url_for("transcription_settings_logout"),
             message=request.args.get("message"),
             error=request.args.get("error"),
         )
@@ -469,6 +494,131 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
     return app
 
 
+SETTINGS_LOGIN_TEMPLATE = """
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ title }}</title>
+    <style>
+      :root {
+        --bg: #101214;
+        --panel: #15191d;
+        --text: #f6f7f8;
+        --muted: #a8b0b8;
+        --line: #2c333b;
+        --accent: #70d1ff;
+        --warn: #ffb770;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: var(--text);
+        background:
+          radial-gradient(circle at top left, rgba(112, 209, 255, 0.14), transparent 26rem),
+          linear-gradient(150deg, #101214, #0b0d0f),
+          var(--bg);
+        min-height: 100vh;
+      }
+      main {
+        max-width: 640px;
+        margin: 0 auto;
+        padding: 1.2rem 1rem 3rem;
+      }
+      .shell {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 1.25rem;
+        box-shadow: 0 24px 72px rgba(0, 0, 0, 0.28);
+      }
+      .eyebrow {
+        display: inline-flex;
+        border-radius: 999px;
+        padding: 0.3rem 0.72rem;
+        background: rgba(112, 209, 255, 0.08);
+        color: var(--accent);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        font-size: 0.78rem;
+        font-weight: 800;
+      }
+      h1 {
+        margin: 0.85rem 0 0.35rem;
+        font-size: clamp(2rem, 8vw, 3.6rem);
+        line-height: 0.95;
+        letter-spacing: 0;
+      }
+      p {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.6;
+      }
+      .banner {
+        margin-top: 1rem;
+        border-radius: 8px;
+        padding: 0.85rem 1rem;
+        background: rgba(255, 183, 112, 0.1);
+        color: var(--warn);
+        font-weight: 700;
+      }
+      form {
+        display: grid;
+        gap: 0.85rem;
+        margin-top: 1rem;
+      }
+      label {
+        display: grid;
+        gap: 0.35rem;
+        font-weight: 700;
+      }
+      input, button { font: inherit; }
+      input {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: rgba(6, 13, 20, 0.78);
+        padding: 0.9rem 0.95rem;
+        color: var(--text);
+      }
+      button {
+        appearance: none;
+        border: none;
+        border-radius: 8px;
+        padding: 0.9rem 1rem;
+        background: #f6f7f8;
+        color: #101214;
+        font-weight: 850;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="shell">
+        <div class="eyebrow">Control Panel</div>
+        <h1>Transcription Settings</h1>
+        <p>Sign in to manage room transcription and translation output.</p>
+        {% if error %}
+        <div class="banner">{{ error }}</div>
+        {% endif %}
+        <form method="post" action="{{ url_for('transcription_settings_login_post') }}">
+          <input type="hidden" name="next" value="{{ next_url }}">
+          <label>
+            Password
+            <input type="password" name="password" autocomplete="current-password" autofocus required>
+          </label>
+          <button type="submit">Open Settings</button>
+        </form>
+      </section>
+    </main>
+  </body>
+</html>
+"""
+
+
 SETTINGS_TEMPLATE = """
 <!doctype html>
 <html lang="en">
@@ -496,6 +646,7 @@ SETTINGS_TEMPLATE = """
         align-items: end;
         margin-bottom: 20px;
       }
+      .top-actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
       h1 { margin: 0; font-size: clamp(28px, 4vw, 46px); line-height: 1; letter-spacing: 0; }
       .sub { color: #a8b0b8; margin-top: 8px; }
       .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin: 20px 0; }
@@ -597,7 +748,12 @@ SETTINGS_TEMPLATE = """
           <h1>Transcription Settings</h1>
           <div class="sub">Controls for source transcription and translated room output. WebCall stays separate.</div>
         </div>
-        <a class="button" href="{{ public_base }}">Open Display</a>
+        <div class="top-actions">
+          <a class="button" href="{{ public_base }}">Open Display</a>
+          <form method="post" action="{{ logout_url }}">
+            <button class="button" type="submit">Sign Out</button>
+          </form>
+        </div>
       </header>
 
       {% if message %}<div class="notice">{{ message }}</div>{% endif %}

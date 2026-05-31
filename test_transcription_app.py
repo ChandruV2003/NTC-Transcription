@@ -1,15 +1,9 @@
 import sqlite3
 import tempfile
 import unittest
-from base64 import b64encode
 from pathlib import Path
 
 from ntc_transcription_app import create_app
-
-
-def _basic_auth(password: str = "settings-password"):
-    token = b64encode(f"admin:{password}".encode("utf-8")).decode("ascii")
-    return {"Authorization": f"Basic {token}"}
 
 
 def _create_test_db(path: Path):
@@ -132,6 +126,7 @@ class TranscriptionTests(unittest.TestCase):
                 "NTC_TRANSCRIPTION_VISIBLE_ROOMS": "room-a,room-b",
                 "NTC_TRANSCRIPTION_DEFAULT_ROOM": "room-a",
                 "NTC_TRANSCRIPTION_SETTINGS_PASSWORD": "settings-password",
+                "SECRET_KEY": "test-secret",
             }
         )
         self.client = self.app.test_client()
@@ -164,16 +159,38 @@ class TranscriptionTests(unittest.TestCase):
         self.assertNotIn(b"Meeting live", response.data)
         self.assertNotIn(b"active_rooms", response.data)
 
-    def test_settings_requires_authentication(self):
+    def _login_settings(self, password: str = "settings-password", *, follow_redirects: bool = True):
+        return self.client.post(
+            "/transcription/settings/login",
+            data={"password": password, "next": "/transcription/settings"},
+            follow_redirects=follow_redirects,
+        )
+
+    def test_settings_redirects_to_password_login(self):
         response = self.client.get("/transcription/settings")
 
-        self.assertEqual(response.status_code, 401)
-        self.assertIn("Basic", response.headers["WWW-Authenticate"])
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/transcription/settings/login", response.headers["Location"])
+
+    def test_settings_login_page_uses_password_only(self):
+        response = self.client.get("/transcription/settings/login")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Transcription Settings", response.data)
+        self.assertIn(b'name="password"', response.data)
+        self.assertNotIn(b'name="username"', response.data)
+
+    def test_settings_login_rejects_wrong_password(self):
+        response = self._login_settings("wrong-password")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Password was not accepted.", response.data)
 
     def test_settings_panel_shows_room_controls_and_stats(self):
         _insert_segment(self.db_path, "room-a", "Recent settings transcript.", received_at="2999-01-01T00:00:00+00:00")
+        self._login_settings()
 
-        response = self.client.get("/transcription/settings?room=room-a", headers=_basic_auth())
+        response = self.client.get("/transcription/settings?room=room-a")
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Transcription Settings", response.data)
@@ -182,12 +199,13 @@ class TranscriptionTests(unittest.TestCase):
         self.assertIn(b"Recent Transcription Stats", response.data)
         self.assertIn(b"segments in", response.data)
         self.assertIn(b"WebCall stays separate", response.data)
+        self.assertIn(b"Sign Out", response.data)
 
     def test_settings_can_toggle_room_transcription(self):
+        self._login_settings()
         enabled = self.client.post(
             "/transcription/settings/rooms/room-a/transcription",
             data={"transcription_enabled": "1"},
-            headers=_basic_auth(),
             follow_redirects=True,
         )
 
@@ -201,7 +219,6 @@ class TranscriptionTests(unittest.TestCase):
         disabled = self.client.post(
             "/transcription/settings/rooms/room-a/transcription",
             data={"transcription_enabled": "0"},
-            headers=_basic_auth(),
             follow_redirects=True,
         )
 
@@ -213,16 +230,15 @@ class TranscriptionTests(unittest.TestCase):
             )
 
     def test_settings_can_update_supported_translation_controls(self):
+        self._login_settings()
         output = self.client.post(
             "/transcription/settings/rooms/room-a/translation-output",
             data={"translation_output_enabled": "1"},
-            headers=_basic_auth(),
             follow_redirects=True,
         )
         language = self.client.post(
             "/transcription/settings/rooms/room-a/translation-settings",
             data={"target_language": "es"},
-            headers=_basic_auth(),
             follow_redirects=True,
         )
 
