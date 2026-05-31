@@ -627,68 +627,209 @@ SETTINGS_TEMPLATE = """
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ title }}</title>
     <style>
+      :root {
+        --bg: #0f1113;
+        --surface: #15191d;
+        --surface-2: #1a1f24;
+        --surface-3: #101316;
+        --line: #303842;
+        --line-soft: #242a31;
+        --text: #f7f8fa;
+        --muted: #9aa4ad;
+        --green: #70e2a0;
+        --green-bg: #113a2c;
+        --amber: #ffd166;
+        --amber-bg: #3c3014;
+        --red: #ff8fa3;
+        --red-bg: #3d1d25;
+        --blue: #83bfff;
+      }
       * { box-sizing: border-box; }
       body {
         margin: 0;
-        background: #101214;
-        color: #f6f7f8;
+        background: var(--bg);
+        color: var(--text);
         font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
       main {
-        width: min(1120px, calc(100vw - 32px));
+        width: min(1180px, calc(100vw - 32px));
         margin: 0 auto;
-        padding: 28px 0 40px;
+        padding: 24px 0 40px;
       }
       header {
         display: flex;
         justify-content: space-between;
         gap: 16px;
-        align-items: end;
-        margin-bottom: 20px;
+        align-items: flex-start;
+        margin-bottom: 18px;
       }
-      .top-actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
-      h1 { margin: 0; font-size: clamp(28px, 4vw, 46px); line-height: 1; letter-spacing: 0; }
-      .sub { color: #a8b0b8; margin-top: 8px; }
-      .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin: 20px 0; }
-      .tab,
+      h1 {
+        margin: 0;
+        font-size: 46px;
+        line-height: 1;
+        letter-spacing: 0;
+      }
+      form { margin: 0; }
+      button,
+      input,
+      select { font: inherit; }
+      .eyebrow {
+        color: var(--blue);
+        font-size: 12px;
+        font-weight: 850;
+        letter-spacing: 0;
+        margin-bottom: 8px;
+        text-transform: uppercase;
+      }
+      .sub {
+        color: var(--muted);
+        margin-top: 9px;
+        line-height: 1.45;
+      }
+      .top-actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+      }
       .button {
-        border: 1px solid #343b44;
+        appearance: none;
+        border: 1px solid var(--line);
         border-radius: 8px;
-        background: #181c20;
-        color: #f6f7f8;
+        background: var(--surface-2);
+        color: var(--text);
         padding: 10px 14px;
         text-decoration: none;
         font-weight: 800;
         cursor: pointer;
+        min-height: 42px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        white-space: nowrap;
       }
-      .tab.active,
-      .button.primary { background: #f6f7f8; color: #101214; border-color: #f6f7f8; }
-      .panel {
-        border: 1px solid #2c333b;
-        border-radius: 8px;
-        background: #15191d;
-        padding: 20px;
+      .button:hover { border-color: #46515d; }
+      .button.primary {
+        background: var(--text);
+        color: #101214;
+        border-color: var(--text);
       }
-      .grid {
+      .button.warning {
+        background: var(--amber-bg);
+        color: var(--amber);
+        border-color: rgba(255, 209, 102, 0.34);
+      }
+      .tabs {
         display: grid;
-        grid-template-columns: minmax(0, 1.1fr) minmax(280px, .9fr);
-        gap: 16px;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 8px;
+        margin: 18px 0;
       }
-      .stack { display: grid; gap: 14px; }
-      .control {
-        border: 1px solid #2c333b;
+      .tab {
+        border: 1px solid var(--line-soft);
         border-radius: 8px;
-        background: #111417;
-        padding: 16px;
-      }
-      .control h2 { margin: 0 0 8px; font-size: 18px; letter-spacing: 0; }
-      .control p { margin: 0; color: #a8b0b8; line-height: 1.45; }
-      .row {
+        background: var(--surface);
+        color: var(--text);
         display: flex;
-        gap: 12px;
         align-items: center;
         justify-content: space-between;
+        gap: 12px;
+        padding: 12px 14px;
+        text-decoration: none;
+        min-height: 54px;
+      }
+      .tab.active {
+        border-color: var(--blue);
+        background: #18212b;
+      }
+      .tab-title {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-weight: 850;
+      }
+      .dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+        background: var(--line);
+        flex: 0 0 auto;
+      }
+      .dot.good { background: var(--green); }
+      .dot.warn { background: var(--amber); }
+      .notice {
+        border-radius: 8px;
+        padding: 12px 14px;
+        margin-bottom: 14px;
+        background: #14251c;
+        color: #a9f4c2;
+      }
+      .notice.error {
+        background: var(--red-bg);
+        color: var(--red);
+      }
+      .status-strip {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+        margin-bottom: 16px;
+      }
+      .status-tile,
+      .card {
+        border: 1px solid var(--line-soft);
+        border-radius: 8px;
+        background: var(--surface);
+      }
+      .status-tile {
+        padding: 14px;
+        min-height: 82px;
+      }
+      .label {
+        display: block;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 850;
+        letter-spacing: 0;
+        text-transform: uppercase;
+      }
+      .status-value {
+        display: block;
+        margin-top: 8px;
+        font-size: 20px;
+        font-weight: 900;
+        line-height: 1.1;
+        overflow-wrap: anywhere;
+      }
+      .layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1.12fr) minmax(320px, 0.88fr);
+        gap: 16px;
+        align-items: start;
+      }
+      .stack {
+        display: grid;
+        gap: 14px;
+      }
+      .card {
+        padding: 18px;
+      }
+      .card-head {
+        display: flex;
+        gap: 12px;
+        justify-content: space-between;
+        align-items: flex-start;
         flex-wrap: wrap;
+      }
+      .card h2 {
+        margin: 0;
+        font-size: 19px;
+        letter-spacing: 0;
+      }
+      .card p {
+        margin: 7px 0 0;
+        color: var(--muted);
+        line-height: 1.45;
       }
       .pill {
         display: inline-flex;
@@ -696,48 +837,109 @@ SETTINGS_TEMPLATE = """
         min-height: 30px;
         padding: 6px 10px;
         border-radius: 999px;
-        background: #252b31;
+        background: var(--surface-2);
         color: #d8dde2;
         font-size: 13px;
         font-weight: 850;
+        white-space: nowrap;
       }
-      .good { background: #113f32; color: #8ff0c0; }
-      .warn { background: #473614; color: #ffd784; }
-      .bad { background: #451d24; color: #ff9aa9; }
-      .muted { color: #a8b0b8; }
+      .pill.good { background: var(--green-bg); color: var(--green); }
+      .pill.warn { background: var(--amber-bg); color: var(--amber); }
+      .pill.bad { background: var(--red-bg); color: var(--red); }
+      .action-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-top: 16px;
+        flex-wrap: wrap;
+      }
+      .action-row .button { min-width: 220px; }
+      .select-row {
+        display: grid;
+        grid-template-columns: minmax(160px, 1fr) auto;
+        gap: 10px;
+        margin-top: 12px;
+      }
       select {
         min-height: 42px;
         border-radius: 8px;
-        border: 1px solid #343b44;
-        background: #0f1215;
-        color: #f6f7f8;
+        border: 1px solid var(--line);
+        background: var(--surface-3);
+        color: var(--text);
         padding: 0 10px;
+        width: 100%;
       }
-      .notice {
-        border-radius: 8px;
-        padding: 12px 14px;
-        margin-bottom: 14px;
-        background: #17251f;
-        color: #9cf0bd;
-      }
-      .notice.error { background: #32181f; color: #ff9aa9; }
-      .stats {
+      .meta-grid {
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 10px;
+        margin-top: 14px;
       }
       .metric {
-        border: 1px solid #2c333b;
+        border: 1px solid var(--line-soft);
         border-radius: 8px;
         padding: 14px;
-        background: #101316;
+        background: var(--surface-3);
       }
-      .metric strong { display: block; font-size: 28px; }
-      .metric span { color: #a8b0b8; font-size: 13px; }
+      .metric strong {
+        display: block;
+        font-size: 30px;
+        line-height: 1;
+      }
+      .metric span {
+        color: var(--muted);
+        font-size: 13px;
+        display: block;
+        margin-top: 6px;
+      }
+      .details {
+        display: grid;
+        gap: 10px;
+        margin: 14px 0 0;
+      }
+      .detail-row {
+        display: grid;
+        grid-template-columns: 110px minmax(0, 1fr);
+        gap: 12px;
+        border-top: 1px solid var(--line-soft);
+        padding-top: 10px;
+      }
+      .detail-row:first-child {
+        border-top: 0;
+        padding-top: 0;
+      }
+      .detail-row dt {
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 800;
+      }
+      .detail-row dd {
+        margin: 0;
+        min-width: 0;
+        overflow-wrap: anywhere;
+      }
+      .empty {
+        border: 1px dashed var(--line);
+        border-radius: 8px;
+        padding: 22px;
+        color: var(--muted);
+      }
       @media (max-width: 760px) {
         main { width: min(100vw - 24px, 1120px); padding-top: 18px; }
-        header,
-        .grid { grid-template-columns: 1fr; display: grid; align-items: start; }
+        h1 { font-size: 30px; }
+        header { display: grid; }
+        .top-actions { justify-content: stretch; }
+        .top-actions .button,
+        .top-actions form,
+        .top-actions button { width: 100%; }
+        .status-strip,
+        .layout,
+        .meta-grid,
+        .select-row { grid-template-columns: 1fr; }
+        .tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .action-row .button { width: 100%; min-width: 0; }
+        .detail-row { grid-template-columns: 1fr; gap: 4px; }
       }
     </style>
   </head>
@@ -745,8 +947,9 @@ SETTINGS_TEMPLATE = """
     <main>
       <header>
         <div>
+          <div class="eyebrow">Control Panel</div>
           <h1>Transcription Settings</h1>
-          <div class="sub">Controls for source transcription and translated room output. WebCall stays separate.</div>
+          <div class="sub">Room source, transcription, and translation controls. WebCall stays separate.</div>
         </div>
         <div class="top-actions">
           <a class="button" href="{{ public_base }}">Open Display</a>
@@ -762,101 +965,159 @@ SETTINGS_TEMPLATE = """
       <nav class="tabs">
         {% for room in rooms %}
           <a class="tab {% if selected and room.slug == selected.slug %}active{% endif %}" href="{{ url_for('transcription_settings', room=room.slug) }}">
-            {{ room.label }}
+            <span class="tab-title">{{ room.label }}</span>
+            <span class="dot {% if room.transcription_enabled %}good{% elif room.source_requested %}warn{% endif %}"></span>
           </a>
         {% endfor %}
       </nav>
 
       {% if selected %}
-      <section class="panel">
-        <div class="grid">
-          <div class="stack">
-            <div class="control">
-              <div class="row">
-                <div>
-                  <h2>Source Transcription</h2>
-                  <p>Turns on the room source for transcription without starting a public WebCall meeting.</p>
-                </div>
-                <span class="pill {% if selected.transcription_enabled %}good{% else %}warn{% endif %}">
-                  {{ "On" if selected.transcription_enabled else "Off" }}
-                </span>
+      <section class="status-strip" aria-label="Selected room status">
+        <div class="status-tile">
+          <span class="label">Transcription</span>
+          <span class="status-value">{{ "On" if selected.transcription_enabled else "Off" }}</span>
+        </div>
+        <div class="status-tile">
+          <span class="label">Source</span>
+          <span class="status-value">{{ "Requested" if selected.source_requested else "Idle" }}</span>
+        </div>
+        <div class="status-tile">
+          <span class="label">Ingest</span>
+          <span class="status-value">{{ "Running" if selected.source_ingesting else "Stopped" }}</span>
+        </div>
+        <div class="status-tile">
+          <span class="label">Output</span>
+          <span class="status-value">
+            {% if selected.translation_output_supported %}
+              {{ "On" if selected.translation_output_enabled else "Off" }}
+            {% else %}
+              Unavailable
+            {% endif %}
+          </span>
+        </div>
+      </section>
+
+      <div class="layout">
+        <div class="stack">
+          <section class="card">
+            <div class="card-head">
+              <div>
+                <span class="label">Selected Room</span>
+                <h2>Source Transcription</h2>
               </div>
-              <form method="post" action="{{ url_for('set_room_transcription', room_slug=selected.slug) }}" style="margin-top: 14px;">
+              <span class="pill {% if selected.transcription_enabled %}good{% else %}warn{% endif %}">
+                {{ "Enabled" if selected.transcription_enabled else "Disabled" }}
+              </span>
+            </div>
+            <div class="action-row">
+              <p>{{ selected.label }} audio is {{ "being transcribed" if selected.transcription_enabled else "not being transcribed" }}.</p>
+              <form method="post" action="{{ url_for('set_room_transcription', room_slug=selected.slug) }}">
                 <input type="hidden" name="transcription_enabled" value="{{ "0" if selected.transcription_enabled else "1" }}">
-                <button class="button primary" type="submit">
+                <button class="button {% if selected.transcription_enabled %}warning{% else %}primary{% endif %}" type="submit">
                   {{ "Turn Transcription Off" if selected.transcription_enabled else "Turn Transcription On" }}
                 </button>
               </form>
             </div>
+          </section>
 
-            <div class="control">
-              <div class="row">
-                <div>
-                  <h2>Translation Output</h2>
-                  <p>Controls translated audio sent back to the supported room output path.</p>
-                </div>
-                {% if selected.translation_output_supported %}
-                  <span class="pill {% if selected.translation_output_enabled %}good{% else %}warn{% endif %}">
-                    {{ "On" if selected.translation_output_enabled else "Off" }}
-                  </span>
-                {% else %}
-                  <span class="pill">Unavailable</span>
-                {% endif %}
+          <section class="card">
+            <div class="card-head">
+              <div>
+                <span class="label">Mandarin Audio</span>
+                <h2>Translation Output</h2>
               </div>
               {% if selected.translation_output_supported %}
-                <form method="post" action="{{ url_for('set_translation_output', room_slug=selected.slug) }}" style="margin-top: 14px;">
+                <span class="pill {% if selected.translation_output_enabled %}good{% else %}warn{% endif %}">
+                  {{ "Enabled" if selected.translation_output_enabled else "Disabled" }}
+                </span>
+              {% else %}
+                <span class="pill">Unavailable</span>
+              {% endif %}
+            </div>
+            {% if selected.translation_output_supported %}
+              <div class="action-row">
+                <p>{{ selected.translation_target_language_label }} output is {{ "armed" if selected.translation_output_enabled else "muted" }}.</p>
+                <form method="post" action="{{ url_for('set_translation_output', room_slug=selected.slug) }}">
                   <input type="hidden" name="translation_output_enabled" value="{{ "0" if selected.translation_output_enabled else "1" }}">
-                  <button class="button" type="submit">
-                    {{ "Turn Translation Output Off" if selected.translation_output_enabled else "Turn Translation Output On" }}
+                  <button class="button {% if selected.translation_output_enabled %}warning{% else %}primary{% endif %}" type="submit">
+                    {{ "Turn Output Off" if selected.translation_output_enabled else "Turn Output On" }}
                   </button>
                 </form>
-                <form method="post" action="{{ url_for('set_translation_settings', room_slug=selected.slug) }}" class="row" style="margin-top: 12px; justify-content: flex-start;">
-                  <select name="target_language" aria-label="Translation target language">
-                    {% for option in language_options %}
-                      <option value="{{ option.code }}" {% if selected.translation_target_language == option.code %}selected{% endif %}>{{ option.label }}</option>
-                    {% endfor %}
-                  </select>
-                  <button class="button" type="submit">Set Language</button>
-                </form>
-              {% endif %}
-            </div>
-          </div>
-
-          <aside class="stack">
-            <div class="control">
-              <h2>Source Status</h2>
-              <p>{{ selected.host_label }}{% if selected.current_device %} · {{ selected.current_device }}{% endif %}</p>
-              <div class="row" style="justify-content: flex-start; margin-top: 12px;">
-                <span class="pill {% if selected.source_requested %}good{% else %}warn{% endif %}">Source {{ "Requested" if selected.source_requested else "Idle" }}</span>
-                <span class="pill {% if selected.source_ingesting %}good{% else %}warn{% endif %}">Ingest {{ "Running" if selected.source_ingesting else "Stopped" }}</span>
               </div>
-              {% if selected.last_seen_at %}<p style="margin-top: 10px;">Last seen {{ selected.last_seen_at }}</p>{% endif %}
-              {% if selected.last_error %}<p class="bad" style="margin-top: 10px;">{{ selected.last_error }}</p>{% endif %}
-            </div>
-
-            <div class="control">
-              <h2>Recent Transcription Stats</h2>
-              <div class="stats">
-                <div class="metric">
-                  <strong>{{ selected.stats.segment_count }}</strong>
-                  <span>segments in {{ selected.stats.window_minutes }} min</span>
-                </div>
-                <div class="metric">
-                  <strong>{{ selected.stats.character_count }}</strong>
-                  <span>characters</span>
-                </div>
-              </div>
-              {% if selected.stats.last_received_at %}
-                <p style="margin-top: 12px;">Latest line {{ selected.stats.last_received_at }}</p>
-              {% else %}
-                <p style="margin-top: 12px;">No recent transcript lines.</p>
-              {% endif %}
-            </div>
-          </aside>
+              <form method="post" action="{{ url_for('set_translation_settings', room_slug=selected.slug) }}" class="select-row">
+                <select name="target_language" aria-label="Translation target language">
+                  {% for option in language_options %}
+                    <option value="{{ option.code }}" {% if selected.translation_target_language == option.code %}selected{% endif %}>{{ option.label }}</option>
+                  {% endfor %}
+                </select>
+                <button class="button" type="submit">Set Language</button>
+              </form>
+            {% else %}
+              <p>{{ selected.label }} does not have translated room output configured.</p>
+            {% endif %}
+          </section>
         </div>
-      </section>
+
+        <aside class="stack">
+          <section class="card">
+            <div class="card-head">
+              <div>
+                <span class="label">Room Agent</span>
+                <h2>Source Status</h2>
+              </div>
+              <span class="pill {% if selected.source_ingesting %}good{% elif selected.source_requested %}warn{% else %}{% endif %}">
+                {% if selected.source_ingesting %}Live{% elif selected.source_requested %}Requested{% else %}Idle{% endif %}
+              </span>
+            </div>
+            <dl class="details">
+              <div class="detail-row">
+                <dt>Host</dt>
+                <dd>{{ selected.host_label }}</dd>
+              </div>
+              <div class="detail-row">
+                <dt>Device</dt>
+                <dd>{{ selected.current_device or "No input selected" }}</dd>
+              </div>
+              <div class="detail-row">
+                <dt>Last Seen</dt>
+                <dd>{{ selected.last_seen_at or "Not seen yet" }}</dd>
+              </div>
+              {% if selected.last_error %}
+              <div class="detail-row">
+                <dt>Error</dt>
+                <dd>{{ selected.last_error }}</dd>
+              </div>
+              {% endif %}
+            </dl>
+          </section>
+
+          <section class="card">
+            <div class="card-head">
+              <div>
+                <span class="label">Last {{ selected.stats.window_minutes }} Min</span>
+                <h2>Recent Transcription Stats</h2>
+              </div>
+            </div>
+            <div class="meta-grid">
+              <div class="metric">
+                <strong>{{ selected.stats.segment_count }}</strong>
+                <span>segments in {{ selected.stats.window_minutes }} min</span>
+              </div>
+              <div class="metric">
+                <strong>{{ selected.stats.character_count }}</strong>
+                <span>characters</span>
+              </div>
+            </div>
+            {% if selected.stats.last_received_at %}
+              <p>Latest line {{ selected.stats.last_received_at }}</p>
+            {% else %}
+              <p>No recent transcript lines.</p>
+            {% endif %}
+          </section>
+        </aside>
+      </div>
       {% else %}
-        <section class="panel"><p>No rooms are configured.</p></section>
+        <section class="empty">No rooms are configured.</section>
       {% endif %}
     </main>
   </body>
