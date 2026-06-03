@@ -532,27 +532,32 @@ SETTINGS_LOGIN_TEMPLATE = """
         margin: 0;
         font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         color: var(--text);
+        background: #050913;
+        min-height: 100vh;
+        position: relative;
+      }
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        z-index: 0;
+        pointer-events: none;
         background-color: var(--bg);
         background-image:
           linear-gradient(180deg, rgba(5, 10, 18, 0.44), rgba(5, 10, 18, 0.86)),
           radial-gradient(circle at 12% 0%, rgba(143, 211, 255, 0.18), transparent 30rem),
           radial-gradient(circle at 96% 14%, rgba(116, 221, 180, 0.10), transparent 28rem),
           url("{{ brand_background_url }}");
-        background-size: cover, auto, auto, cover;
-        background-position: center, top left, top right, center;
+        background-size: cover, auto, auto, min(100vw, 1920px) auto;
+        background-position: center, top left, top right, center 6rem;
         background-repeat: no-repeat;
-        background-attachment: fixed, fixed, fixed, fixed;
-        min-height: 100vh;
-      }
-      @supports (-webkit-touch-callout: none) {
-        body {
-          background-attachment: scroll, scroll, scroll, scroll;
-        }
       }
       main {
         max-width: 640px;
         margin: 0 auto;
         padding: 1.2rem 1rem 3rem;
+        position: relative;
+        z-index: 1;
       }
       .shell {
         background: var(--panel);
@@ -622,6 +627,10 @@ SETTINGS_LOGIN_TEMPLATE = """
       }
       @media (max-width: 640px) {
         h1 { font-size: 2.4rem; }
+        body::before {
+          background-size: cover, auto, auto, 100vw auto;
+          background-position: center, top left, top right, center 8rem;
+        }
       }
     </style>
   </head>
@@ -681,28 +690,34 @@ SETTINGS_TEMPLATE = """
       }
       body {
         margin: 0;
+        background: #050913;
+        min-height: 100vh;
+        position: relative;
+        color: var(--text);
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        z-index: 0;
+        pointer-events: none;
         background-color: var(--bg);
         background-image:
           linear-gradient(180deg, rgba(5, 10, 18, 0.44), rgba(5, 10, 18, 0.86)),
           radial-gradient(circle at 12% 0%, rgba(143, 211, 255, 0.18), transparent 30rem),
           radial-gradient(circle at 96% 14%, rgba(116, 221, 180, 0.10), transparent 28rem),
           url("{{ brand_background_url }}");
-        background-size: cover, auto, auto, cover;
-        background-position: center, top left, top right, center;
+        background-size: cover, auto, auto, min(100vw, 1920px) auto;
+        background-position: center, top left, top right, center 6rem;
         background-repeat: no-repeat;
-        background-attachment: fixed, fixed, fixed, fixed;
-        color: var(--text);
-        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      }
-      @supports (-webkit-touch-callout: none) {
-        body {
-          background-attachment: scroll, scroll, scroll, scroll;
-        }
       }
       main {
         width: min(1180px, calc(100vw - 32px));
         margin: 0 auto;
         padding: 24px 0 40px;
+        position: relative;
+        z-index: 1;
       }
       header {
         display: flex;
@@ -1066,6 +1081,10 @@ SETTINGS_TEMPLATE = """
         .switch-form,
         .switch-control { width: 100%; }
         .detail-row { grid-template-columns: 1fr; gap: 4px; }
+        body::before {
+          background-size: cover, auto, auto, 100vw auto;
+          background-position: center, top left, top right, center 8rem;
+        }
       }
     </style>
   </head>
