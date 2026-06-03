@@ -557,11 +557,11 @@ SETTINGS_LOGIN_TEMPLATE = """
         font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
         color: var(--text);
         background-image:
-          linear-gradient(180deg, rgba(5, 10, 18, 0.44), rgba(5, 10, 18, 0.86)),
+          linear-gradient(180deg, rgba(5, 10, 18, 0.34), rgba(5, 10, 18, 0.84)),
           radial-gradient(circle at 12% 0%, rgba(143, 211, 255, 0.18), transparent 30rem),
           radial-gradient(circle at 96% 14%, rgba(116, 221, 180, 0.10), transparent 28rem),
           url("{{ brand_background_url }}");
-        background-size: cover, auto, auto, cover;
+        background-size: cover, auto, auto, min(1120px, 118vw) auto;
         background-position: center, top left, top right, center;
         background-repeat: no-repeat;
         background-attachment: fixed, fixed, fixed, fixed;
@@ -724,11 +724,11 @@ SETTINGS_TEMPLATE = """
         color: var(--text);
         font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
         background-image:
-          linear-gradient(180deg, rgba(5, 10, 18, 0.44), rgba(5, 10, 18, 0.86)),
+          linear-gradient(180deg, rgba(5, 10, 18, 0.34), rgba(5, 10, 18, 0.84)),
           radial-gradient(circle at 12% 0%, rgba(143, 211, 255, 0.18), transparent 30rem),
           radial-gradient(circle at 96% 14%, rgba(116, 221, 180, 0.10), transparent 28rem),
           url("{{ brand_background_url }}");
-        background-size: cover, auto, auto, cover;
+        background-size: cover, auto, auto, min(1120px, 118vw) auto;
         background-position: center, top left, top right, center;
         background-repeat: no-repeat;
         background-attachment: fixed, fixed, fixed, fixed;
@@ -826,9 +826,10 @@ SETTINGS_TEMPLATE = """
       }
       .tabs {
         display: inline-grid;
-        grid-template-columns: repeat(2, minmax(0, auto));
+        grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 0.28rem;
-        margin: 1rem 0;
+        width: min(520px, 100%);
+        margin: 1rem auto;
         padding: 0.28rem;
         border: 1px solid var(--line);
         border-radius: 999px;
@@ -842,7 +843,7 @@ SETTINGS_TEMPLATE = """
         color: var(--text);
         display: flex;
         align-items: center;
-        justify-content: space-between;
+        justify-content: center;
         gap: 12px;
         padding: 0.58rem 0.82rem;
         text-decoration: none;
@@ -865,6 +866,7 @@ SETTINGS_TEMPLATE = """
         text-overflow: ellipsis;
         white-space: nowrap;
         font-weight: 850;
+        text-align: center;
       }
       .dot {
         width: 0.58rem;
