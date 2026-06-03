@@ -568,6 +568,7 @@ SETTINGS_LOGIN_TEMPLATE = """
         --shadow: 0 24px 80px rgba(0, 0, 0, 0.38);
       }
       * { box-sizing: border-box; }
+      [hidden] { display: none !important; }
       html {
         min-height: 100%;
         background: #050913;
@@ -741,6 +742,7 @@ SETTINGS_TEMPLATE = """
         --mono: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
       }
       * { box-sizing: border-box; }
+      [hidden] { display: none !important; }
       html {
         min-height: 100%;
         background: #050913;
@@ -1181,8 +1183,19 @@ SETTINGS_TEMPLATE = """
           min-height: 2.45rem;
         }
         .action-row .button { width: 100%; min-width: 0; }
+        .select-row .button {
+          min-height: 2.75rem;
+          font-size: 0.95rem;
+          font-weight: 800;
+        }
         .switch-form,
         .switch-control { width: 100%; }
+        .switch-control {
+          grid-template-columns: 0.58rem 5rem;
+        }
+        .switch-copy {
+          width: 5rem;
+        }
         .detail-row { grid-template-columns: 1fr; gap: 4px; }
       }
     </style>
