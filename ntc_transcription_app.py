@@ -948,10 +948,12 @@ SETTINGS_TEMPLATE = """
         min-height: 3.35rem;
         min-width: 10.5rem;
         padding: 0.72rem 0.85rem;
-        display: inline-flex;
+        display: inline-grid;
+        grid-template-columns: 0.58rem 6.7rem;
         align-items: center;
+        justify-items: start;
         justify-content: center;
-        gap: 0.52rem;
+        column-gap: 0.52rem;
         cursor: pointer;
         text-align: left;
         font-weight: 800;
@@ -974,6 +976,7 @@ SETTINGS_TEMPLATE = """
         display: grid;
         gap: 0.1rem;
         min-width: 0;
+        width: 6.7rem;
       }
       .switch-label {
         color: currentColor;
@@ -998,7 +1001,6 @@ SETTINGS_TEMPLATE = """
         height: 0.58rem;
         border-radius: 999px;
         background: currentColor;
-        flex: 0 0 auto;
         opacity: 0.72;
       }
       .switch-knob {
