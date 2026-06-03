@@ -535,15 +535,17 @@ SETTINGS_LOGIN_TEMPLATE = """
     <title>{{ title }}</title>
     <style>
       :root {
-        --bg: #081018;
-        --panel: rgba(12, 20, 30, 0.96);
-        --surface-2: #142030;
-        --text: #eef4fb;
-        --muted: #99a8b8;
-        --line: #213244;
-        --accent: #87d6ff;
+        --bg: #07121e;
+        --panel: rgba(10, 21, 36, 0.94);
+        --surface-2: rgba(18, 34, 53, 0.92);
+        --text: #edf7ff;
+        --muted: #9fb2c6;
+        --line: rgba(143, 211, 255, 0.22);
+        --line-strong: rgba(143, 211, 255, 0.42);
+        --accent: #8fd3ff;
+        --good: #74ddb4;
         --warn: #ffb770;
-        --shadow: 0 18px 44px rgba(0, 0, 0, 0.24);
+        --shadow: 0 24px 80px rgba(0, 0, 0, 0.38);
       }
       * { box-sizing: border-box; }
       html {
@@ -564,6 +566,9 @@ SETTINGS_LOGIN_TEMPLATE = """
         background-repeat: no-repeat;
         background-attachment: fixed, fixed, fixed, fixed;
         min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 16px;
       }
       @supports (-webkit-touch-callout: none) {
         body {
@@ -571,16 +576,17 @@ SETTINGS_LOGIN_TEMPLATE = """
         }
       }
       main {
-        max-width: 640px;
+        width: min(520px, calc(100vw - 32px));
         margin: 0 auto;
-        padding: 1.2rem 1rem 3rem;
+        padding: 0;
       }
       .shell {
         background: var(--panel);
         border: 1px solid var(--line);
-        border-radius: 16px;
-        padding: 1.25rem;
+        border-radius: 28px;
+        padding: 30px;
         box-shadow: var(--shadow);
+        backdrop-filter: blur(18px);
       }
       .eyebrow {
         display: inline-flex;
@@ -588,17 +594,17 @@ SETTINGS_LOGIN_TEMPLATE = """
         border-radius: 999px;
         padding: 0.22rem 0.58rem;
         border: 1px solid var(--line);
-        background: rgba(255, 255, 255, 0.02);
+        background: rgba(143, 211, 255, 0.07);
         color: var(--accent);
         text-transform: uppercase;
         letter-spacing: 0.08em;
         font-size: 0.72rem;
-        font-weight: 700;
+        font-weight: 800;
       }
       h1 {
         margin: 0.85rem 0 0.35rem;
-        font-size: 3.2rem;
-        line-height: 0.95;
+        font-size: clamp(2.25rem, 8vw, 3.55rem);
+        line-height: 0.94;
         letter-spacing: 0;
       }
       p {
@@ -608,7 +614,7 @@ SETTINGS_LOGIN_TEMPLATE = """
       }
       .banner {
         margin-top: 1rem;
-        border-radius: 8px;
+        border-radius: 16px;
         padding: 0.85rem 1rem;
         background: rgba(255, 183, 112, 0.1);
         color: var(--warn);
@@ -628,23 +634,32 @@ SETTINGS_LOGIN_TEMPLATE = """
       input {
         width: 100%;
         border: 1px solid var(--line);
-        border-radius: 10px;
+        border-radius: 16px;
         background: var(--surface-2);
         padding: 0.9rem 0.95rem;
         color: var(--text);
       }
       button {
         appearance: none;
-        border: none;
-        border-radius: 12px;
+        border: 1px solid rgba(143, 211, 255, 0.28);
+        border-radius: 16px;
         padding: 0.9rem 1rem;
-        background: #dff4ff;
-        color: #081018;
+        background: rgba(143, 211, 255, 0.16);
+        color: var(--text);
         font-weight: 850;
         cursor: pointer;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+      }
+      button:hover { border-color: var(--line-strong); background: rgba(143, 211, 255, 0.21); }
+      input:focus-visible,
+      button:focus-visible {
+        outline: none;
+        border-color: var(--line-strong);
+        box-shadow: 0 0 0 3px rgba(143, 211, 255, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.05);
       }
       @media (max-width: 640px) {
-        h1 { font-size: 2.4rem; }
+        main { width: min(100%, calc(100vw - 28px)); }
+        .shell { border-radius: 24px; padding: 24px; }
       }
     </style>
   </head>
@@ -681,22 +696,22 @@ SETTINGS_TEMPLATE = """
     <title>{{ title }}</title>
     <style>
       :root {
-        --bg: #081018;
-        --surface: rgba(12, 20, 30, 0.96);
-        --surface-2: #142030;
-        --surface-3: #1a2838;
-        --text: #eef4fb;
-        --muted: #99a8b8;
-        --line: #213244;
-        --line-strong: #31506d;
-        --accent: #87d6ff;
+        --bg: #07121e;
+        --surface: rgba(10, 21, 36, 0.92);
+        --surface-2: rgba(18, 34, 53, 0.9);
+        --surface-3: rgba(6, 13, 24, 0.58);
+        --text: #edf7ff;
+        --muted: #9fb2c6;
+        --line: rgba(143, 211, 255, 0.2);
+        --line-strong: rgba(143, 211, 255, 0.36);
+        --accent: #8fd3ff;
         --good: #74ddb4;
         --good-soft: rgba(116, 221, 180, 0.12);
         --warn: #ffb770;
         --warn-soft: rgba(255, 183, 112, 0.12);
         --bad: #ff9b9b;
         --bad-soft: rgba(255, 155, 155, 0.12);
-        --shadow: 0 18px 44px rgba(0, 0, 0, 0.24);
+        --shadow: 0 22px 70px rgba(0, 0, 0, 0.34);
         --mono: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
       }
       * { box-sizing: border-box; }
@@ -725,9 +740,9 @@ SETTINGS_TEMPLATE = """
         }
       }
       main {
-        max-width: 1120px;
+        width: min(1320px, calc(100vw - 32px));
         margin: 0 auto;
-        padding: 0.9rem 0.9rem 2.15rem;
+        padding: 30px 0 44px;
       }
       .topbar {
         display: grid;
@@ -744,8 +759,8 @@ SETTINGS_TEMPLATE = """
       }
       h1 {
         margin: 0;
-        font-size: 2.5rem;
-        line-height: 1;
+        font-size: clamp(2.2rem, 5.2vw, 4rem);
+        line-height: 0.94;
         letter-spacing: 0;
       }
       form { margin: 0; }
@@ -781,7 +796,7 @@ SETTINGS_TEMPLATE = """
       .button {
         appearance: none;
         border: 1px solid var(--line);
-        border-radius: 12px;
+        border-radius: 14px;
         background: var(--surface-2);
         color: var(--text);
         padding: 0.74rem 0.92rem;
@@ -800,9 +815,9 @@ SETTINGS_TEMPLATE = """
         border-color: var(--line-strong);
       }
       .button.primary {
-        background: #dff4ff;
-        color: #081018;
-        border-color: #dff4ff;
+        background: linear-gradient(135deg, rgba(116, 221, 180, 0.22), rgba(143, 211, 255, 0.13));
+        color: #dcfff0;
+        border-color: rgba(116, 221, 180, 0.46);
       }
       .button.warning {
         background: var(--warn-soft);
@@ -810,23 +825,28 @@ SETTINGS_TEMPLATE = """
         border-color: rgba(255, 209, 102, 0.34);
       }
       .tabs {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 0.75rem;
+        display: inline-grid;
+        grid-template-columns: repeat(2, minmax(0, auto));
+        gap: 0.28rem;
         margin: 1rem 0;
+        padding: 0.28rem;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: rgba(5, 13, 24, 0.58);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
       }
       .tab {
-        border: 1px solid var(--line);
-        border-radius: 12px;
-        background: var(--surface-2);
+        border: 1px solid transparent;
+        border-radius: 999px;
+        background: transparent;
         color: var(--text);
         display: flex;
         align-items: center;
         justify-content: space-between;
         gap: 12px;
-        padding: 0.82rem 0.95rem;
+        padding: 0.58rem 0.82rem;
         text-decoration: none;
-        min-height: 3.35rem;
+        min-height: 2.65rem;
         transition: border-color 140ms ease, background 140ms ease, transform 140ms ease, color 140ms ease;
       }
       .tab:hover,
@@ -836,8 +856,8 @@ SETTINGS_TEMPLATE = """
       }
       .tab.active {
         border-color: rgba(135, 214, 255, 0.42);
-        background: var(--surface-3);
-        box-shadow: inset 0 0 0 1px rgba(135, 214, 255, 0.12);
+        background: linear-gradient(135deg, rgba(143, 211, 255, 0.18), rgba(143, 245, 200, 0.12));
+        box-shadow: 0 10px 26px rgba(8, 19, 33, 0.26), inset 0 0 0 1px rgba(255, 255, 255, 0.04);
       }
       .tab-title {
         min-width: 0;
@@ -877,9 +897,10 @@ SETTINGS_TEMPLATE = """
       .status-tile,
       .card {
         border: 1px solid var(--line);
-        border-radius: 16px;
+        border-radius: 24px;
         background: var(--surface);
         box-shadow: var(--shadow);
+        backdrop-filter: blur(18px);
       }
       .status-tile {
         padding: 0.95rem;
@@ -938,7 +959,7 @@ SETTINGS_TEMPLATE = """
         min-height: 30px;
         padding: 6px 10px;
         border-radius: 999px;
-        background: var(--surface-2);
+        background: rgba(18, 34, 53, 0.78);
         color: #d8dde2;
         font-size: 0.82rem;
         font-weight: 800;
@@ -962,7 +983,7 @@ SETTINGS_TEMPLATE = """
       .switch-control {
         appearance: none;
         border: 1px solid var(--line);
-        border-radius: 10px;
+        border-radius: 14px;
         background: var(--surface-2);
         color: var(--text);
         min-height: 3.35rem;
@@ -1034,7 +1055,7 @@ SETTINGS_TEMPLATE = """
       }
       select {
         min-height: 2.75rem;
-        border-radius: 10px;
+        border-radius: 14px;
         border: 1px solid var(--line);
         background: var(--surface-2);
         color: var(--text);
@@ -1049,7 +1070,7 @@ SETTINGS_TEMPLATE = """
       }
       .metric {
         border: 1px solid var(--line);
-        border-radius: 12px;
+        border-radius: 18px;
         padding: 0.9rem;
         background: rgba(6, 13, 20, 0.78);
       }
@@ -1092,7 +1113,7 @@ SETTINGS_TEMPLATE = """
       }
       .empty {
         border: 1px dashed var(--line);
-        border-radius: 16px;
+        border-radius: 20px;
         padding: 1.25rem;
         color: var(--muted);
       }
@@ -1113,15 +1134,20 @@ SETTINGS_TEMPLATE = """
         }
       }
       @media (max-width: 720px) {
-        main { padding: 0.8rem 0.8rem 2rem; }
-        h1 { font-size: 1.9rem; }
+        main { width: min(100vw - 24px, 1120px); padding: 18px 0 2rem; }
+        h1 { font-size: 2.1rem; }
         .top-actions,
         .top-actions form,
         .top-actions .button { width: 100%; }
         .status-strip,
         .meta-grid,
         .select-row { grid-template-columns: 1fr; }
-        .tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .tabs {
+          display: grid;
+          grid-template-columns: 1fr;
+          width: 100%;
+          border-radius: 22px;
+        }
         .action-row .button { width: 100%; min-width: 0; }
         .switch-form,
         .switch-control { width: 100%; }
