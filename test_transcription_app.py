@@ -210,6 +210,8 @@ class TranscriptionTests(unittest.TestCase):
         self.assertIn(b"Sign Out", response.data)
         self.assertIn(b"ntc-embossed-background.jpg", response.data)
         self.assertIn(b"switch-control", response.data)
+        self.assertIn(b"data-status-url", response.data)
+        self.assertIn(b"/api/internal/transcription/settings/status", response.data)
 
     def test_settings_can_toggle_room_transcription(self):
         self._login_settings()
@@ -254,6 +256,32 @@ class TranscriptionTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Stopping", response.data)
+
+    def test_settings_status_api_requires_auth(self):
+        response = self.client.get("/api/internal/transcription/settings/status?room=room-a")
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_settings_status_api_reports_live_source_state(self):
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute("UPDATE rooms SET transcription_enabled = 1 WHERE slug = 'room-a'")
+            connection.execute(
+                """
+                UPDATE source_runtime
+                SET desired_active = 1, is_ingesting = 1
+                WHERE host_slug = 'hp-envy-16-ad0xx'
+                """
+            )
+        self._login_settings()
+
+        response = self.client.get("/api/internal/transcription/settings/status?room=room-a")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["selected_slug"], "room-a")
+        self.assertEqual(payload["selected"]["source_status_label"], "Live")
+        self.assertEqual(payload["selected"]["source_status_tone"], "good")
+        self.assertTrue(payload["selected"]["source_ingesting"])
 
     def test_settings_can_update_supported_translation_controls(self):
         self._login_settings()

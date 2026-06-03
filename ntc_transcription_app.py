@@ -327,6 +327,12 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
             return redirect(url_for("transcription_settings_login", next=request.full_path))
         return None
 
+    def _settings_context(selected_room_slug: str | None = None):
+        rooms = transcription_store.list_settings_rooms(_visible_rooms())
+        selected_slug = _canonical_room_slug(selected_room_slug) or app.config["NTC_TRANSCRIPTION_DEFAULT_ROOM"]
+        selected = next((room for room in rooms if room["slug"] == selected_slug), None) or (rooms[0] if rooms else None)
+        return rooms, selected
+
     @app.after_request
     def no_store(response):
         response.headers["Cache-Control"] = "no-store"
@@ -421,9 +427,7 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
         auth_response = _require_settings_auth()
         if auth_response:
             return auth_response
-        rooms = transcription_store.list_settings_rooms(_visible_rooms())
-        selected_slug = _canonical_room_slug(request.args.get("room")) or app.config["NTC_TRANSCRIPTION_DEFAULT_ROOM"]
-        selected = next((room for room in rooms if room["slug"] == selected_slug), None) or (rooms[0] if rooms else None)
+        rooms, selected = _settings_context(request.args.get("room"))
         return render_template_string(
             SETTINGS_TEMPLATE,
             title=f"{app.config['NTC_TRANSCRIPTION_TITLE']} Settings",
@@ -432,9 +436,25 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
             language_options=TRANSLATION_LANGUAGE_OPTIONS,
             public_base=url_for("public_transcription"),
             logout_url=url_for("transcription_settings_logout"),
+            settings_status_url=url_for("settings_status"),
+            poll_ms=app.config["NTC_TRANSCRIPTION_POLL_MS"],
             message=request.args.get("message"),
             error=request.args.get("error"),
             brand_background_url=url_for("ntc_brand_background"),
+        )
+
+    @app.get("/api/internal/transcription/settings/status")
+    def settings_status():
+        if not _settings_authorized():
+            return jsonify({"error": "settings auth required"}), 403
+        rooms, selected = _settings_context(request.args.get("room"))
+        return jsonify(
+            {
+                "rooms": rooms,
+                "selected": selected,
+                "selected_slug": selected["slug"] if selected else "",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
         )
 
     @app.post("/transcription/settings/rooms/<room_slug>/transcription")
@@ -1168,7 +1188,12 @@ SETTINGS_TEMPLATE = """
     </style>
   </head>
   <body>
-    <main>
+    <main
+      id="settings-app"
+      data-selected-room="{{ selected.slug if selected else '' }}"
+      data-status-url="{{ settings_status_url }}"
+      data-poll-ms="{{ poll_ms }}"
+    >
       <header class="topbar">
         <a class="button" href="{{ public_base }}">Open Display</a>
         <div class="brand">
@@ -1188,9 +1213,9 @@ SETTINGS_TEMPLATE = """
 
       <nav class="tabs">
         {% for room in rooms %}
-          <a class="tab {% if selected and room.slug == selected.slug %}active{% endif %}" href="{{ url_for('transcription_settings', room=room.slug) }}">
+          <a class="tab {% if selected and room.slug == selected.slug %}active{% endif %}" href="{{ url_for('transcription_settings', room=room.slug) }}" data-room-tab="{{ room.slug }}">
             <span class="tab-title">{{ room.label }}</span>
-            <span class="dot {{ room.source_status_tone }}"></span>
+            <span class="dot {{ room.source_status_tone }}" data-room-dot></span>
           </a>
         {% endfor %}
       </nav>
@@ -1199,19 +1224,19 @@ SETTINGS_TEMPLATE = """
       <section class="status-strip" aria-label="Selected room status">
         <div class="status-tile">
           <span class="label">Transcription</span>
-          <span class="status-value">{{ "On" if selected.transcription_enabled else "Off" }}</span>
+          <span class="status-value" data-status-field="transcription">{{ "On" if selected.transcription_enabled else "Off" }}</span>
         </div>
         <div class="status-tile">
           <span class="label">Source</span>
-          <span class="status-value">{{ selected.source_status_label }}</span>
+          <span class="status-value" data-status-field="source">{{ selected.source_status_label }}</span>
         </div>
         <div class="status-tile">
           <span class="label">Ingest</span>
-          <span class="status-value">{{ "Running" if selected.source_ingesting else "Stopped" }}</span>
+          <span class="status-value" data-status-field="ingest">{{ "Running" if selected.source_ingesting else "Stopped" }}</span>
         </div>
         <div class="status-tile">
           <span class="label">Output</span>
-          <span class="status-value">
+          <span class="status-value" data-status-field="output">
             {% if selected.translation_output_supported %}
               {{ "On" if selected.translation_output_enabled else "Off" }}
             {% else %}
@@ -1231,14 +1256,14 @@ SETTINGS_TEMPLATE = """
               </div>
             </div>
             <div class="action-row">
-              <p>{{ selected.label }} audio is {{ "being transcribed" if selected.transcription_enabled else "not being transcribed" }}.</p>
+              <p data-source-summary>{{ selected.label }} audio is {{ "being transcribed" if selected.transcription_enabled else "not being transcribed" }}.</p>
               <form class="switch-form" method="post" action="{{ url_for('set_room_transcription', room_slug=selected.slug) }}">
-                <input type="hidden" name="transcription_enabled" value="{{ "0" if selected.transcription_enabled else "1" }}">
-                <button class="switch-control {% if selected.transcription_enabled %}is-on{% else %}is-off{% endif %}" type="submit" aria-label="{{ "Turn transcription off" if selected.transcription_enabled else "Turn transcription on" }}">
+                <input type="hidden" name="transcription_enabled" value="{{ "0" if selected.transcription_enabled else "1" }}" data-transcription-enabled-input>
+                <button class="switch-control {% if selected.transcription_enabled %}is-on{% else %}is-off{% endif %}" type="submit" aria-label="{{ "Turn transcription off" if selected.transcription_enabled else "Turn transcription on" }}" data-transcription-switch>
                   <span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span>
                   <span class="switch-copy">
-                    <span class="switch-label">{{ "ON" if selected.transcription_enabled else "OFF" }}</span>
-                    <span class="switch-caption">{{ "Transcribing" if selected.transcription_enabled else "Source idle" }}</span>
+                    <span class="switch-label" data-transcription-switch-label>{{ "ON" if selected.transcription_enabled else "OFF" }}</span>
+                    <span class="switch-caption" data-transcription-switch-caption>{{ "Transcribing" if selected.transcription_enabled else "Source idle" }}</span>
                   </span>
                 </button>
               </form>
@@ -1254,14 +1279,14 @@ SETTINGS_TEMPLATE = """
             </div>
             {% if selected.translation_output_supported %}
               <div class="action-row">
-                <p>{{ selected.translation_target_language_label }} output is {{ "armed" if selected.translation_output_enabled else "muted" }}.</p>
+                <p data-translation-summary>{{ selected.translation_target_language_label }} output is {{ "armed" if selected.translation_output_enabled else "muted" }}.</p>
                 <form class="switch-form" method="post" action="{{ url_for('set_translation_output', room_slug=selected.slug) }}">
-                  <input type="hidden" name="translation_output_enabled" value="{{ "0" if selected.translation_output_enabled else "1" }}">
-                  <button class="switch-control {% if selected.translation_output_enabled %}is-on{% else %}is-off{% endif %}" type="submit" aria-label="{{ "Turn translation output off" if selected.translation_output_enabled else "Turn translation output on" }}">
+                  <input type="hidden" name="translation_output_enabled" value="{{ "0" if selected.translation_output_enabled else "1" }}" data-translation-output-input>
+                  <button class="switch-control {% if selected.translation_output_enabled %}is-on{% else %}is-off{% endif %}" type="submit" aria-label="{{ "Turn translation output off" if selected.translation_output_enabled else "Turn translation output on" }}" data-translation-switch>
                     <span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span>
                     <span class="switch-copy">
-                      <span class="switch-label">{{ "ON" if selected.translation_output_enabled else "OFF" }}</span>
-                      <span class="switch-caption">{{ "Audio armed" if selected.translation_output_enabled else "Muted" }}</span>
+                      <span class="switch-label" data-translation-switch-label>{{ "ON" if selected.translation_output_enabled else "OFF" }}</span>
+                      <span class="switch-caption" data-translation-switch-caption>{{ "Audio armed" if selected.translation_output_enabled else "Muted" }}</span>
                     </span>
                   </button>
                 </form>
@@ -1287,27 +1312,25 @@ SETTINGS_TEMPLATE = """
                 <span class="label">Room Agent</span>
                 <h2>Source Status</h2>
               </div>
-              <span class="pill {{ selected.source_status_tone }}">{{ selected.source_status_label }}</span>
+              <span class="pill {{ selected.source_status_tone }}" data-source-pill>{{ selected.source_status_label }}</span>
             </div>
             <dl class="details">
               <div class="detail-row">
                 <dt>Host</dt>
-                <dd>{{ selected.host_label }}</dd>
+                <dd data-source-detail="host">{{ selected.host_label }}</dd>
               </div>
               <div class="detail-row">
                 <dt>Device</dt>
-                <dd>{{ selected.current_device or "No input selected" }}</dd>
+                <dd data-source-detail="device">{{ selected.current_device or "No input selected" }}</dd>
               </div>
               <div class="detail-row">
                 <dt>Last Seen</dt>
-                <dd>{{ selected.last_seen_at or "Not seen yet" }}</dd>
+                <dd data-source-detail="last_seen">{{ selected.last_seen_at or "Not seen yet" }}</dd>
               </div>
-              {% if selected.last_error %}
-              <div class="detail-row">
+              <div class="detail-row" data-source-error-row {% if not selected.last_error %}hidden{% endif %}>
                 <dt>Error</dt>
-                <dd>{{ selected.last_error }}</dd>
+                <dd data-source-detail="error">{{ selected.last_error }}</dd>
               </div>
-              {% endif %}
             </dl>
           </section>
 
@@ -1320,19 +1343,15 @@ SETTINGS_TEMPLATE = """
             </div>
             <div class="meta-grid">
               <div class="metric">
-                <strong>{{ selected.stats.segment_count }}</strong>
-                <span>segments in {{ selected.stats.window_minutes }} min</span>
+                <strong data-stat-field="segments">{{ selected.stats.segment_count }}</strong>
+                <span data-stat-field="segments_label">segments in {{ selected.stats.window_minutes }} min</span>
               </div>
               <div class="metric">
-                <strong>{{ selected.stats.character_count }}</strong>
+                <strong data-stat-field="characters">{{ selected.stats.character_count }}</strong>
                 <span>characters</span>
               </div>
             </div>
-            {% if selected.stats.last_received_at %}
-              <p>Latest line {{ selected.stats.last_received_at }}</p>
-            {% else %}
-              <p>No recent transcript lines.</p>
-            {% endif %}
+            <p data-stat-field="latest">{% if selected.stats.last_received_at %}Latest line {{ selected.stats.last_received_at }}{% else %}No recent transcript lines.{% endif %}</p>
           </section>
         </aside>
       </div>
@@ -1340,6 +1359,128 @@ SETTINGS_TEMPLATE = """
         <section class="empty">No rooms are configured.</section>
       {% endif %}
     </main>
+    <script>
+      (() => {
+        const app = document.getElementById("settings-app");
+        if (!app || !app.dataset.statusUrl) return;
+
+        const pollMs = Math.max(750, Number(app.dataset.pollMs || "1000"));
+        const selectedRoom = app.dataset.selectedRoom || "";
+        const tones = ["good", "warn", "bad"];
+        let inFlight = false;
+
+        function setText(selector, value) {
+          const element = document.querySelector(selector);
+          if (element) element.textContent = value;
+        }
+
+        function setTone(element, tone) {
+          if (!element) return;
+          element.classList.remove(...tones);
+          if (tone) element.classList.add(tone);
+        }
+
+        function setSwitch(button, enabled) {
+          if (!button) return;
+          button.classList.toggle("is-on", enabled);
+          button.classList.toggle("is-off", !enabled);
+        }
+
+        function updateRoomDots(rooms) {
+          const roomMap = new Map((rooms || []).map((room) => [room.slug, room]));
+          document.querySelectorAll("[data-room-tab]").forEach((tab) => {
+            const room = roomMap.get(tab.dataset.roomTab || "");
+            if (!room) return;
+            setTone(tab.querySelector("[data-room-dot]"), room.source_status_tone || "");
+          });
+        }
+
+        function updateSelectedRoom(room) {
+          if (!room) return;
+
+          setText('[data-status-field="transcription"]', room.transcription_enabled ? "On" : "Off");
+          setText('[data-status-field="source"]', room.source_status_label || "Idle");
+          setText('[data-status-field="ingest"]', room.source_ingesting ? "Running" : "Stopped");
+          setText(
+            '[data-status-field="output"]',
+            room.translation_output_supported ? (room.translation_output_enabled ? "On" : "Off") : "Unavailable"
+          );
+
+          const sourcePill = document.querySelector("[data-source-pill]");
+          if (sourcePill) {
+            sourcePill.textContent = room.source_status_label || "Idle";
+            setTone(sourcePill, room.source_status_tone || "");
+          }
+
+          setText("[data-source-summary]", `${room.label} audio is ${room.transcription_enabled ? "being transcribed" : "not being transcribed"}.`);
+          setText('[data-source-detail="host"]', room.host_label || "No source host");
+          setText('[data-source-detail="device"]', room.current_device || "No input selected");
+          setText('[data-source-detail="last_seen"]', room.last_seen_at || "Not seen yet");
+          const errorRow = document.querySelector("[data-source-error-row]");
+          const errorText = document.querySelector('[data-source-detail="error"]');
+          if (errorRow) errorRow.hidden = !room.last_error;
+          if (errorText) errorText.textContent = room.last_error || "";
+
+          const transcriptionInput = document.querySelector("[data-transcription-enabled-input]");
+          const transcriptionButton = document.querySelector("[data-transcription-switch]");
+          if (transcriptionInput) transcriptionInput.value = room.transcription_enabled ? "0" : "1";
+          if (transcriptionButton) {
+            setSwitch(transcriptionButton, !!room.transcription_enabled);
+            transcriptionButton.setAttribute("aria-label", room.transcription_enabled ? "Turn transcription off" : "Turn transcription on");
+          }
+          setText("[data-transcription-switch-label]", room.transcription_enabled ? "ON" : "OFF");
+          setText("[data-transcription-switch-caption]", room.transcription_enabled ? "Transcribing" : "Source idle");
+
+          const translationInput = document.querySelector("[data-translation-output-input]");
+          const translationButton = document.querySelector("[data-translation-switch]");
+          if (translationInput) translationInput.value = room.translation_output_enabled ? "0" : "1";
+          if (translationButton) {
+            setSwitch(translationButton, !!room.translation_output_enabled);
+            translationButton.setAttribute("aria-label", room.translation_output_enabled ? "Turn translation output off" : "Turn translation output on");
+          }
+          setText("[data-translation-switch-label]", room.translation_output_enabled ? "ON" : "OFF");
+          setText("[data-translation-switch-caption]", room.translation_output_enabled ? "Audio armed" : "Muted");
+          setText(
+            "[data-translation-summary]",
+            `${room.translation_target_language_label || "Translation"} output is ${room.translation_output_enabled ? "armed" : "muted"}.`
+          );
+
+          const stats = room.stats || {};
+          setText('[data-stat-field="segments"]', String(stats.segment_count ?? 0));
+          setText('[data-stat-field="segments_label"]', `segments in ${stats.window_minutes ?? 180} min`);
+          setText('[data-stat-field="characters"]', String(stats.character_count ?? 0));
+          setText(
+            '[data-stat-field="latest"]',
+            stats.last_received_at ? `Latest line ${stats.last_received_at}` : "No recent transcript lines."
+          );
+        }
+
+        async function refreshStatus() {
+          if (inFlight || document.hidden) return;
+          inFlight = true;
+          try {
+            const url = new URL(app.dataset.statusUrl, window.location.origin);
+            if (selectedRoom) url.searchParams.set("room", selectedRoom);
+            url.searchParams.set("_ts", String(Date.now()));
+            const response = await fetch(url.toString(), { cache: "no-store" });
+            if (!response.ok) return;
+            const payload = await response.json();
+            updateRoomDots(payload.rooms || []);
+            updateSelectedRoom(payload.selected);
+          } catch (error) {
+            /* ignore transient status refresh failures */
+          } finally {
+            inFlight = false;
+          }
+        }
+
+        window.setInterval(refreshStatus, pollMs);
+        document.addEventListener("visibilitychange", () => {
+          if (!document.hidden) refreshStatus();
+        });
+        refreshStatus();
+      })();
+    </script>
   </body>
 </html>
 """
