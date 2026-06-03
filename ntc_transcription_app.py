@@ -515,13 +515,15 @@ SETTINGS_LOGIN_TEMPLATE = """
     <title>{{ title }}</title>
     <style>
       :root {
-        --bg: #101214;
-        --panel: #15191d;
-        --text: #f6f7f8;
-        --muted: #a8b0b8;
-        --line: #2c333b;
-        --accent: #70d1ff;
+        --bg: #081018;
+        --panel: rgba(12, 20, 30, 0.96);
+        --surface-2: #142030;
+        --text: #eef4fb;
+        --muted: #99a8b8;
+        --line: #213244;
+        --accent: #87d6ff;
         --warn: #ffb770;
+        --shadow: 0 18px 44px rgba(0, 0, 0, 0.24);
       }
       * { box-sizing: border-box; }
       html {
@@ -530,52 +532,48 @@ SETTINGS_LOGIN_TEMPLATE = """
       }
       body {
         margin: 0;
-        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
         color: var(--text);
-        background: #050913;
-        min-height: 100vh;
-        position: relative;
-      }
-      body::before {
-        content: "";
-        position: fixed;
-        inset: 0;
-        z-index: 0;
-        pointer-events: none;
-        background-color: var(--bg);
         background-image:
           linear-gradient(180deg, rgba(5, 10, 18, 0.44), rgba(5, 10, 18, 0.86)),
           radial-gradient(circle at 12% 0%, rgba(143, 211, 255, 0.18), transparent 30rem),
           radial-gradient(circle at 96% 14%, rgba(116, 221, 180, 0.10), transparent 28rem),
           url("{{ brand_background_url }}");
-        background-size: cover, auto, auto, min(100vw, 1920px) auto;
-        background-position: center, top left, top right, center 6rem;
+        background-size: cover, auto, auto, cover;
+        background-position: center, top left, top right, center;
         background-repeat: no-repeat;
+        background-attachment: fixed, fixed, fixed, fixed;
+        min-height: 100vh;
+      }
+      @supports (-webkit-touch-callout: none) {
+        body {
+          background-attachment: scroll, scroll, scroll, scroll;
+        }
       }
       main {
         max-width: 640px;
         margin: 0 auto;
         padding: 1.2rem 1rem 3rem;
-        position: relative;
-        z-index: 1;
       }
       .shell {
         background: var(--panel);
         border: 1px solid var(--line);
-        border-radius: 8px;
+        border-radius: 16px;
         padding: 1.25rem;
-        box-shadow: 0 24px 72px rgba(0, 0, 0, 0.28);
+        box-shadow: var(--shadow);
       }
       .eyebrow {
         display: inline-flex;
+        width: fit-content;
         border-radius: 999px;
-        padding: 0.3rem 0.72rem;
-        background: rgba(112, 209, 255, 0.08);
+        padding: 0.22rem 0.58rem;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.02);
         color: var(--accent);
         text-transform: uppercase;
-        letter-spacing: 0;
-        font-size: 0.78rem;
-        font-weight: 800;
+        letter-spacing: 0.08em;
+        font-size: 0.72rem;
+        font-weight: 700;
       }
       h1 {
         margin: 0.85rem 0 0.35rem;
@@ -610,27 +608,23 @@ SETTINGS_LOGIN_TEMPLATE = """
       input {
         width: 100%;
         border: 1px solid var(--line);
-        border-radius: 8px;
-        background: rgba(6, 13, 20, 0.78);
+        border-radius: 10px;
+        background: var(--surface-2);
         padding: 0.9rem 0.95rem;
         color: var(--text);
       }
       button {
         appearance: none;
         border: none;
-        border-radius: 8px;
+        border-radius: 12px;
         padding: 0.9rem 1rem;
-        background: #f6f7f8;
-        color: #101214;
+        background: #dff4ff;
+        color: #081018;
         font-weight: 850;
         cursor: pointer;
       }
       @media (max-width: 640px) {
         h1 { font-size: 2.4rem; }
-        body::before {
-          background-size: cover, auto, auto, 100vw auto;
-          background-position: center, top left, top right, center 8rem;
-        }
       }
     </style>
   </head>
@@ -667,21 +661,23 @@ SETTINGS_TEMPLATE = """
     <title>{{ title }}</title>
     <style>
       :root {
-        --bg: #0f1113;
-        --surface: rgba(18, 24, 31, 0.92);
-        --surface-2: rgba(24, 32, 41, 0.94);
-        --surface-3: rgba(11, 16, 22, 0.92);
-        --line: #303842;
-        --line-soft: #242a31;
-        --text: #f7f8fa;
-        --muted: #9aa4ad;
-        --green: #70e2a0;
-        --green-bg: #113a2c;
-        --amber: #ffd166;
-        --amber-bg: #3c3014;
-        --red: #ff8fa3;
-        --red-bg: #3d1d25;
-        --blue: #83bfff;
+        --bg: #081018;
+        --surface: rgba(12, 20, 30, 0.96);
+        --surface-2: #142030;
+        --surface-3: #1a2838;
+        --text: #eef4fb;
+        --muted: #99a8b8;
+        --line: #213244;
+        --line-strong: #31506d;
+        --accent: #87d6ff;
+        --good: #74ddb4;
+        --good-soft: rgba(116, 221, 180, 0.12);
+        --warn: #ffb770;
+        --warn-soft: rgba(255, 183, 112, 0.12);
+        --bad: #ff9b9b;
+        --bad-soft: rgba(255, 155, 155, 0.12);
+        --shadow: 0 18px 44px rgba(0, 0, 0, 0.24);
+        --mono: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
       }
       * { box-sizing: border-box; }
       html {
@@ -690,45 +686,45 @@ SETTINGS_TEMPLATE = """
       }
       body {
         margin: 0;
-        background: #050913;
-        min-height: 100vh;
-        position: relative;
         color: var(--text);
-        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      }
-      body::before {
-        content: "";
-        position: fixed;
-        inset: 0;
-        z-index: 0;
-        pointer-events: none;
-        background-color: var(--bg);
+        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
         background-image:
           linear-gradient(180deg, rgba(5, 10, 18, 0.44), rgba(5, 10, 18, 0.86)),
           radial-gradient(circle at 12% 0%, rgba(143, 211, 255, 0.18), transparent 30rem),
           radial-gradient(circle at 96% 14%, rgba(116, 221, 180, 0.10), transparent 28rem),
           url("{{ brand_background_url }}");
-        background-size: cover, auto, auto, min(100vw, 1920px) auto;
-        background-position: center, top left, top right, center 6rem;
+        background-size: cover, auto, auto, cover;
+        background-position: center, top left, top right, center;
         background-repeat: no-repeat;
+        background-attachment: fixed, fixed, fixed, fixed;
+        min-height: 100vh;
+      }
+      @supports (-webkit-touch-callout: none) {
+        body {
+          background-attachment: scroll, scroll, scroll, scroll;
+        }
       }
       main {
-        width: min(1180px, calc(100vw - 32px));
+        max-width: 1120px;
         margin: 0 auto;
-        padding: 24px 0 40px;
-        position: relative;
-        z-index: 1;
+        padding: 0.9rem 0.9rem 2.15rem;
       }
-      header {
-        display: flex;
-        justify-content: space-between;
-        gap: 16px;
-        align-items: flex-start;
-        margin-bottom: 18px;
+      .topbar {
+        display: grid;
+        grid-template-columns: auto 1fr auto;
+        gap: 0.85rem;
+        align-items: center;
+        margin-bottom: 0.9rem;
+      }
+      .brand {
+        display: grid;
+        gap: 0.2rem;
+        justify-items: center;
+        text-align: center;
       }
       h1 {
         margin: 0;
-        font-size: 46px;
+        font-size: 2.5rem;
         line-height: 1;
         letter-spacing: 0;
       }
@@ -737,73 +733,91 @@ SETTINGS_TEMPLATE = """
       input,
       select { font: inherit; }
       .eyebrow {
-        color: var(--blue);
-        font-size: 12px;
-        font-weight: 850;
-        letter-spacing: 0;
-        margin-bottom: 8px;
+        display: inline-flex;
+        width: fit-content;
+        border-radius: 999px;
+        padding: 0.22rem 0.58rem;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.02);
+        color: var(--accent);
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
         text-transform: uppercase;
+        font-family: var(--mono);
       }
       .sub {
         color: var(--muted);
-        margin-top: 9px;
-        line-height: 1.45;
+        margin-top: 0;
+        line-height: 1.4;
       }
       .top-actions {
         display: flex;
-        gap: 8px;
+        gap: 0.65rem;
         flex-wrap: wrap;
         justify-content: flex-end;
+        justify-self: end;
       }
       .button {
         appearance: none;
         border: 1px solid var(--line);
-        border-radius: 8px;
+        border-radius: 12px;
         background: var(--surface-2);
         color: var(--text);
-        padding: 10px 14px;
+        padding: 0.74rem 0.92rem;
         text-decoration: none;
-        font-weight: 800;
+        font-weight: 700;
         cursor: pointer;
-        min-height: 42px;
         display: inline-flex;
         align-items: center;
         justify-content: center;
         white-space: nowrap;
+        transition: border-color 140ms ease, background 140ms ease, transform 140ms ease, color 140ms ease;
       }
-      .button:hover { border-color: #46515d; }
+      .button:hover,
+      .button:focus-visible {
+        transform: translateY(-1px);
+        border-color: var(--line-strong);
+      }
       .button.primary {
-        background: var(--text);
-        color: #101214;
-        border-color: var(--text);
+        background: #dff4ff;
+        color: #081018;
+        border-color: #dff4ff;
       }
       .button.warning {
-        background: var(--amber-bg);
-        color: var(--amber);
+        background: var(--warn-soft);
+        color: var(--warn);
         border-color: rgba(255, 209, 102, 0.34);
       }
       .tabs {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-        gap: 8px;
-        margin: 18px 0;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.75rem;
+        margin: 1rem 0;
       }
       .tab {
-        border: 1px solid var(--line-soft);
-        border-radius: 8px;
-        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--surface-2);
         color: var(--text);
         display: flex;
         align-items: center;
         justify-content: space-between;
         gap: 12px;
-        padding: 12px 14px;
+        padding: 0.82rem 0.95rem;
         text-decoration: none;
-        min-height: 54px;
+        min-height: 3.35rem;
+        transition: border-color 140ms ease, background 140ms ease, transform 140ms ease, color 140ms ease;
+      }
+      .tab:hover,
+      .tab:focus-visible {
+        transform: translateY(-1px);
+        border-color: var(--line-strong);
       }
       .tab.active {
-        border-color: var(--blue);
-        background: #18212b;
+        border-color: rgba(135, 214, 255, 0.42);
+        background: var(--surface-3);
+        box-shadow: inset 0 0 0 1px rgba(135, 214, 255, 0.12);
       }
       .tab-title {
         min-width: 0;
@@ -813,69 +827,73 @@ SETTINGS_TEMPLATE = """
         font-weight: 850;
       }
       .dot {
-        width: 10px;
-        height: 10px;
+        width: 0.58rem;
+        height: 0.58rem;
         border-radius: 999px;
         background: var(--line);
         flex: 0 0 auto;
       }
-      .dot.good { background: var(--green); }
-      .dot.warn { background: var(--amber); }
+      .dot.good { background: var(--good); }
+      .dot.warn { background: var(--warn); }
       .notice {
-        border-radius: 8px;
-        padding: 12px 14px;
-        margin-bottom: 14px;
-        background: #14251c;
-        color: #a9f4c2;
+        border-radius: 12px;
+        padding: 0.82rem 0.95rem;
+        margin-bottom: 1rem;
+        background: var(--good-soft);
+        border: 1px solid var(--line);
+        color: var(--good);
+        font-weight: 600;
       }
       .notice.error {
-        background: var(--red-bg);
-        color: var(--red);
+        background: var(--bad-soft);
+        color: var(--bad);
       }
       .status-strip {
         display: grid;
         grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 10px;
-        margin-bottom: 16px;
+        gap: 0.75rem;
+        margin-bottom: 1rem;
       }
       .status-tile,
       .card {
-        border: 1px solid var(--line-soft);
-        border-radius: 8px;
+        border: 1px solid var(--line);
+        border-radius: 16px;
         background: var(--surface);
+        box-shadow: var(--shadow);
       }
       .status-tile {
-        padding: 14px;
+        padding: 0.95rem;
         min-height: 82px;
       }
       .label {
         display: block;
         color: var(--muted);
-        font-size: 12px;
-        font-weight: 850;
-        letter-spacing: 0;
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
         text-transform: uppercase;
+        font-family: var(--mono);
       }
       .status-value {
         display: block;
         margin-top: 8px;
-        font-size: 20px;
-        font-weight: 900;
+        font-size: 1.15rem;
+        font-weight: 800;
         line-height: 1.1;
         overflow-wrap: anywhere;
       }
       .layout {
         display: grid;
-        grid-template-columns: minmax(0, 1.12fr) minmax(320px, 0.88fr);
-        gap: 16px;
+        grid-template-columns: minmax(0, 1.55fr) minmax(18rem, 1fr);
+        gap: 1rem;
         align-items: start;
       }
       .stack {
         display: grid;
-        gap: 14px;
+        gap: 1rem;
       }
       .card {
-        padding: 18px;
+        padding: 1rem;
       }
       .card-head {
         display: flex;
@@ -886,11 +904,11 @@ SETTINGS_TEMPLATE = """
       }
       .card h2 {
         margin: 0;
-        font-size: 19px;
+        font-size: 1.05rem;
         letter-spacing: 0;
       }
       .card p {
-        margin: 7px 0 0;
+        margin: 0.28rem 0 0;
         color: var(--muted);
         line-height: 1.45;
       }
@@ -902,19 +920,19 @@ SETTINGS_TEMPLATE = """
         border-radius: 999px;
         background: var(--surface-2);
         color: #d8dde2;
-        font-size: 13px;
-        font-weight: 850;
+        font-size: 0.82rem;
+        font-weight: 800;
         white-space: nowrap;
       }
-      .pill.good { background: var(--green-bg); color: var(--green); }
-      .pill.warn { background: var(--amber-bg); color: var(--amber); }
-      .pill.bad { background: var(--red-bg); color: var(--red); }
+      .pill.good { background: var(--good-soft); color: var(--good); }
+      .pill.warn { background: var(--warn-soft); color: var(--warn); }
+      .pill.bad { background: var(--bad-soft); color: var(--bad); }
       .action-row {
         display: flex;
         align-items: center;
         justify-content: space-between;
-        gap: 12px;
-        margin-top: 16px;
+        gap: 1rem;
+        margin-top: 1rem;
         flex-wrap: wrap;
       }
       .action-row .button { min-width: 220px; }
@@ -924,102 +942,94 @@ SETTINGS_TEMPLATE = """
       .switch-control {
         appearance: none;
         border: 1px solid var(--line);
-        border-radius: 12px;
+        border-radius: 10px;
         background: var(--surface-2);
         color: var(--text);
-        min-height: 58px;
-        min-width: 210px;
-        padding: 8px 10px 8px 14px;
+        min-height: 3.35rem;
+        min-width: 10.5rem;
+        padding: 0.72rem 0.85rem;
         display: inline-flex;
         align-items: center;
-        justify-content: space-between;
-        gap: 16px;
+        justify-content: center;
+        gap: 0.52rem;
         cursor: pointer;
         text-align: left;
+        font-weight: 800;
+        transition: border-color 140ms ease, background 140ms ease, color 140ms ease, transform 140ms ease;
       }
       .switch-control:hover,
       .switch-control:focus-visible {
-        border-color: #46515d;
+        border-color: var(--line-strong);
+        transform: translateY(-1px);
       }
       .switch-control.is-on {
-        border-color: rgba(112, 226, 160, 0.48);
-        background: rgba(17, 58, 44, 0.86);
+        border-color: rgba(116, 221, 180, 0.42);
+        background: rgba(116, 221, 180, 0.14);
+        color: var(--good);
       }
       .switch-control.is-off {
         color: var(--muted);
       }
       .switch-copy {
         display: grid;
-        gap: 2px;
+        gap: 0.1rem;
         min-width: 0;
       }
       .switch-label {
-        color: var(--text);
-        font-size: 17px;
-        font-weight: 900;
+        color: currentColor;
+        font-size: 1rem;
+        font-weight: 800;
         line-height: 1.1;
+        text-transform: uppercase;
       }
       .switch-control.is-on .switch-label {
-        color: var(--green);
+        color: currentColor;
       }
       .switch-caption {
         color: var(--muted);
-        font-size: 12px;
-        font-weight: 750;
+        font-size: 0.72rem;
+        font-weight: 700;
         line-height: 1.2;
         white-space: nowrap;
       }
       .switch-track {
         position: relative;
-        width: 48px;
-        height: 28px;
+        width: 0.58rem;
+        height: 0.58rem;
         border-radius: 999px;
-        background: #303842;
+        background: currentColor;
         flex: 0 0 auto;
-        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07);
-      }
-      .switch-control.is-on .switch-track {
-        background: #17764e;
+        opacity: 0.72;
       }
       .switch-knob {
-        position: absolute;
-        top: 4px;
-        left: 4px;
-        width: 20px;
-        height: 20px;
-        border-radius: 999px;
-        background: #d8dde2;
-      }
-      .switch-control.is-on .switch-knob {
-        transform: translateX(20px);
-        background: var(--green);
+        display: none;
       }
       .select-row {
         display: grid;
         grid-template-columns: minmax(160px, 1fr) auto;
-        gap: 10px;
-        margin-top: 12px;
+        gap: 0.65rem;
+        margin-top: 0.85rem;
       }
       select {
-        min-height: 42px;
-        border-radius: 8px;
+        min-height: 2.75rem;
+        border-radius: 10px;
         border: 1px solid var(--line);
-        background: var(--surface-3);
+        background: var(--surface-2);
         color: var(--text);
-        padding: 0 10px;
+        padding: 0 0.85rem;
         width: 100%;
       }
       .meta-grid {
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 10px;
-        margin-top: 14px;
+        gap: 0.75rem;
+        margin-top: 0.85rem;
       }
       .metric {
-        border: 1px solid var(--line-soft);
-        border-radius: 8px;
-        padding: 14px;
-        background: var(--surface-3);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 0.9rem;
+        background: rgba(6, 13, 20, 0.78);
       }
       .metric strong {
         display: block;
@@ -1034,15 +1044,15 @@ SETTINGS_TEMPLATE = """
       }
       .details {
         display: grid;
-        gap: 10px;
-        margin: 14px 0 0;
+        gap: 0.65rem;
+        margin: 0.85rem 0 0;
       }
       .detail-row {
         display: grid;
         grid-template-columns: 110px minmax(0, 1fr);
-        gap: 12px;
-        border-top: 1px solid var(--line-soft);
-        padding-top: 10px;
+        gap: 0.75rem;
+        border-top: 1px solid var(--line);
+        padding-top: 0.65rem;
       }
       .detail-row:first-child {
         border-top: 0;
@@ -1050,7 +1060,7 @@ SETTINGS_TEMPLATE = """
       }
       .detail-row dt {
         color: var(--muted);
-        font-size: 13px;
+        font-size: 0.78rem;
         font-weight: 800;
       }
       .detail-row dd {
@@ -1060,20 +1070,33 @@ SETTINGS_TEMPLATE = """
       }
       .empty {
         border: 1px dashed var(--line);
-        border-radius: 8px;
-        padding: 22px;
+        border-radius: 16px;
+        padding: 1.25rem;
         color: var(--muted);
       }
-      @media (max-width: 760px) {
-        main { width: min(100vw - 24px, 1120px); padding-top: 18px; }
-        h1 { font-size: 30px; }
-        header { display: grid; }
-        .top-actions { justify-content: stretch; }
-        .top-actions .button,
+      @media (max-width: 1120px) {
+        .topbar {
+          grid-template-columns: 1fr;
+          justify-items: start;
+        }
+        .brand {
+          justify-items: start;
+          text-align: left;
+        }
+        .top-actions {
+          justify-self: start;
+        }
+        .layout {
+          grid-template-columns: 1fr;
+        }
+      }
+      @media (max-width: 720px) {
+        main { padding: 0.8rem 0.8rem 2rem; }
+        h1 { font-size: 1.9rem; }
+        .top-actions,
         .top-actions form,
-        .top-actions button { width: 100%; }
+        .top-actions .button { width: 100%; }
         .status-strip,
-        .layout,
         .meta-grid,
         .select-row { grid-template-columns: 1fr; }
         .tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -1081,23 +1104,19 @@ SETTINGS_TEMPLATE = """
         .switch-form,
         .switch-control { width: 100%; }
         .detail-row { grid-template-columns: 1fr; gap: 4px; }
-        body::before {
-          background-size: cover, auto, auto, 100vw auto;
-          background-position: center, top left, top right, center 8rem;
-        }
       }
     </style>
   </head>
   <body>
     <main>
-      <header>
-        <div>
-          <div class="eyebrow">Control Panel</div>
+      <header class="topbar">
+        <a class="button" href="{{ public_base }}">Open Display</a>
+        <div class="brand">
+          <span class="eyebrow">Control Panel</span>
           <h1>Transcription Settings</h1>
           <div class="sub">Room source, transcription, and translation controls. WebCall stays separate.</div>
         </div>
         <div class="top-actions">
-          <a class="button" href="{{ public_base }}">Open Display</a>
           <form method="post" action="{{ logout_url }}">
             <button class="button" type="submit">Sign Out</button>
           </form>
@@ -1156,11 +1175,11 @@ SETTINGS_TEMPLATE = """
               <form class="switch-form" method="post" action="{{ url_for('set_room_transcription', room_slug=selected.slug) }}">
                 <input type="hidden" name="transcription_enabled" value="{{ "0" if selected.transcription_enabled else "1" }}">
                 <button class="switch-control {% if selected.transcription_enabled %}is-on{% else %}is-off{% endif %}" type="submit" aria-label="{{ "Turn transcription off" if selected.transcription_enabled else "Turn transcription on" }}">
+                  <span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span>
                   <span class="switch-copy">
-                    <span class="switch-label">{{ "On" if selected.transcription_enabled else "Off" }}</span>
+                    <span class="switch-label">{{ "ON" if selected.transcription_enabled else "OFF" }}</span>
                     <span class="switch-caption">{{ "Transcribing" if selected.transcription_enabled else "Source idle" }}</span>
                   </span>
-                  <span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span>
                 </button>
               </form>
             </div>
@@ -1179,11 +1198,11 @@ SETTINGS_TEMPLATE = """
                 <form class="switch-form" method="post" action="{{ url_for('set_translation_output', room_slug=selected.slug) }}">
                   <input type="hidden" name="translation_output_enabled" value="{{ "0" if selected.translation_output_enabled else "1" }}">
                   <button class="switch-control {% if selected.translation_output_enabled %}is-on{% else %}is-off{% endif %}" type="submit" aria-label="{{ "Turn translation output off" if selected.translation_output_enabled else "Turn translation output on" }}">
+                    <span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span>
                     <span class="switch-copy">
-                      <span class="switch-label">{{ "On" if selected.translation_output_enabled else "Off" }}</span>
+                      <span class="switch-label">{{ "ON" if selected.translation_output_enabled else "OFF" }}</span>
                       <span class="switch-caption">{{ "Audio armed" if selected.translation_output_enabled else "Muted" }}</span>
                     </span>
-                    <span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span>
                   </button>
                 </form>
               </div>
