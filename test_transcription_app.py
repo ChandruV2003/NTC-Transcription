@@ -179,6 +179,14 @@ class TranscriptionTests(unittest.TestCase):
         self.assertIn(b"Transcription Settings", response.data)
         self.assertIn(b'name="password"', response.data)
         self.assertNotIn(b'name="username"', response.data)
+        self.assertIn(b"ntc-embossed-background.jpg", response.data)
+
+    def test_settings_brand_asset_is_served(self):
+        response = self.client.get("/transcription/brand/ntc-embossed-background.jpg")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "image/jpeg")
+        response.close()
 
     def test_settings_login_rejects_wrong_password(self):
         response = self._login_settings("wrong-password")
@@ -200,6 +208,8 @@ class TranscriptionTests(unittest.TestCase):
         self.assertIn(b"segments in", response.data)
         self.assertIn(b"WebCall stays separate", response.data)
         self.assertIn(b"Sign Out", response.data)
+        self.assertIn(b"ntc-embossed-background.jpg", response.data)
+        self.assertIn(b"switch-control", response.data)
 
     def test_settings_can_toggle_room_transcription(self):
         self._login_settings()

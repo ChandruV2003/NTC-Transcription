@@ -8,7 +8,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Flask, jsonify, redirect, render_template_string, request, session, url_for
+from flask import Flask, abort, jsonify, redirect, render_template_string, request, send_file, session, url_for
 
 
 ROOM_SLUG_ALIASES = {
@@ -24,6 +24,8 @@ TRANSLATION_LANGUAGE_OPTIONS = [
 ]
 TRANSLATION_LANGUAGE_LABELS = {item["code"]: item["label"] for item in TRANSLATION_LANGUAGE_OPTIONS}
 TRANSLATION_OUTPUT_HOST_SLUGS = {"hp-envy-16-ad0xx"}
+BRAND_BACKGROUND_FILENAME = "ntc-embossed-background.jpg"
+DEFAULT_BRAND_BACKGROUND_PATH = Path(__file__).resolve().parent / "assets" / BRAND_BACKGROUND_FILENAME
 
 
 def _canonical_room_slug(room_slug: str | None) -> str:
@@ -277,6 +279,7 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
         NTC_TRANSCRIPTION_RENDER_LINES=int(os.getenv("NTC_TRANSCRIPTION_RENDER_LINES", "18")),
         NTC_TRANSCRIPTION_SETTINGS_AUTH_ENABLED=os.getenv("NTC_TRANSCRIPTION_SETTINGS_AUTH_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"},
         NTC_TRANSCRIPTION_SETTINGS_PASSWORD=os.getenv("NTC_TRANSCRIPTION_SETTINGS_PASSWORD", "") or os.getenv("NTC_ADMIN_PASSWORD", ""),
+        NTC_BRAND_BACKGROUND_PATH=os.getenv("NTC_BRAND_BACKGROUND_PATH", str(DEFAULT_BRAND_BACKGROUND_PATH)),
         SECRET_KEY=os.getenv("NTC_SECRET_KEY", "change-me"),
     )
     if test_config:
@@ -317,6 +320,13 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
         except Exception as exc:  # pragma: no cover - defensive runtime guard
             app.logger.exception("transcription health check failed")
             return jsonify({"ok": False, "error": str(exc)}), 500
+
+    @app.get(f"/transcription/brand/{BRAND_BACKGROUND_FILENAME}", endpoint="ntc_brand_background")
+    def ntc_brand_background():
+        path = Path(app.config.get("NTC_BRAND_BACKGROUND_PATH") or DEFAULT_BRAND_BACKGROUND_PATH)
+        if not path.exists() or not path.is_file():
+            abort(404)
+        return send_file(path, mimetype="image/jpeg", conditional=True, max_age=86400)
 
     @app.get("/")
     def index():
@@ -360,6 +370,7 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
             title=f"{app.config['NTC_TRANSCRIPTION_TITLE']} Settings",
             error=request.args.get("error"),
             next_url=request.args.get("next") or url_for("transcription_settings"),
+            brand_background_url=url_for("ntc_brand_background"),
         )
 
     @app.post("/transcription/settings/login")
@@ -403,6 +414,7 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
             logout_url=url_for("transcription_settings_logout"),
             message=request.args.get("message"),
             error=request.args.get("error"),
+            brand_background_url=url_for("ntc_brand_background"),
         )
 
     @app.post("/transcription/settings/rooms/<room_slug>/transcription")
@@ -512,15 +524,30 @@ SETTINGS_LOGIN_TEMPLATE = """
         --warn: #ffb770;
       }
       * { box-sizing: border-box; }
+      html {
+        min-height: 100%;
+        background: #050913;
+      }
       body {
         margin: 0;
         font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         color: var(--text);
-        background:
-          radial-gradient(circle at top left, rgba(112, 209, 255, 0.14), transparent 26rem),
-          linear-gradient(150deg, #101214, #0b0d0f),
-          var(--bg);
+        background-color: var(--bg);
+        background-image:
+          linear-gradient(180deg, rgba(5, 10, 18, 0.44), rgba(5, 10, 18, 0.86)),
+          radial-gradient(circle at 12% 0%, rgba(143, 211, 255, 0.18), transparent 30rem),
+          radial-gradient(circle at 96% 14%, rgba(116, 221, 180, 0.10), transparent 28rem),
+          url("{{ brand_background_url }}");
+        background-size: cover, auto, auto, cover;
+        background-position: center, top left, top right, center;
+        background-repeat: no-repeat;
+        background-attachment: fixed, fixed, fixed, fixed;
         min-height: 100vh;
+      }
+      @supports (-webkit-touch-callout: none) {
+        body {
+          background-attachment: scroll, scroll, scroll, scroll;
+        }
       }
       main {
         max-width: 640px;
@@ -541,13 +568,13 @@ SETTINGS_LOGIN_TEMPLATE = """
         background: rgba(112, 209, 255, 0.08);
         color: var(--accent);
         text-transform: uppercase;
-        letter-spacing: 0.08em;
+        letter-spacing: 0;
         font-size: 0.78rem;
         font-weight: 800;
       }
       h1 {
         margin: 0.85rem 0 0.35rem;
-        font-size: clamp(2rem, 8vw, 3.6rem);
+        font-size: 3.2rem;
         line-height: 0.95;
         letter-spacing: 0;
       }
@@ -593,6 +620,9 @@ SETTINGS_LOGIN_TEMPLATE = """
         font-weight: 850;
         cursor: pointer;
       }
+      @media (max-width: 640px) {
+        h1 { font-size: 2.4rem; }
+      }
     </style>
   </head>
   <body>
@@ -629,9 +659,9 @@ SETTINGS_TEMPLATE = """
     <style>
       :root {
         --bg: #0f1113;
-        --surface: #15191d;
-        --surface-2: #1a1f24;
-        --surface-3: #101316;
+        --surface: rgba(18, 24, 31, 0.92);
+        --surface-2: rgba(24, 32, 41, 0.94);
+        --surface-3: rgba(11, 16, 22, 0.92);
         --line: #303842;
         --line-soft: #242a31;
         --text: #f7f8fa;
@@ -645,11 +675,29 @@ SETTINGS_TEMPLATE = """
         --blue: #83bfff;
       }
       * { box-sizing: border-box; }
+      html {
+        min-height: 100%;
+        background: #050913;
+      }
       body {
         margin: 0;
-        background: var(--bg);
+        background-color: var(--bg);
+        background-image:
+          linear-gradient(180deg, rgba(5, 10, 18, 0.44), rgba(5, 10, 18, 0.86)),
+          radial-gradient(circle at 12% 0%, rgba(143, 211, 255, 0.18), transparent 30rem),
+          radial-gradient(circle at 96% 14%, rgba(116, 221, 180, 0.10), transparent 28rem),
+          url("{{ brand_background_url }}");
+        background-size: cover, auto, auto, cover;
+        background-position: center, top left, top right, center;
+        background-repeat: no-repeat;
+        background-attachment: fixed, fixed, fixed, fixed;
         color: var(--text);
         font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      @supports (-webkit-touch-callout: none) {
+        body {
+          background-attachment: scroll, scroll, scroll, scroll;
+        }
       }
       main {
         width: min(1180px, calc(100vw - 32px));
@@ -855,6 +903,82 @@ SETTINGS_TEMPLATE = """
         flex-wrap: wrap;
       }
       .action-row .button { min-width: 220px; }
+      .switch-form {
+        margin: 0;
+      }
+      .switch-control {
+        appearance: none;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--surface-2);
+        color: var(--text);
+        min-height: 58px;
+        min-width: 210px;
+        padding: 8px 10px 8px 14px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        cursor: pointer;
+        text-align: left;
+      }
+      .switch-control:hover,
+      .switch-control:focus-visible {
+        border-color: #46515d;
+      }
+      .switch-control.is-on {
+        border-color: rgba(112, 226, 160, 0.48);
+        background: rgba(17, 58, 44, 0.86);
+      }
+      .switch-control.is-off {
+        color: var(--muted);
+      }
+      .switch-copy {
+        display: grid;
+        gap: 2px;
+        min-width: 0;
+      }
+      .switch-label {
+        color: var(--text);
+        font-size: 17px;
+        font-weight: 900;
+        line-height: 1.1;
+      }
+      .switch-control.is-on .switch-label {
+        color: var(--green);
+      }
+      .switch-caption {
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 750;
+        line-height: 1.2;
+        white-space: nowrap;
+      }
+      .switch-track {
+        position: relative;
+        width: 48px;
+        height: 28px;
+        border-radius: 999px;
+        background: #303842;
+        flex: 0 0 auto;
+        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07);
+      }
+      .switch-control.is-on .switch-track {
+        background: #17764e;
+      }
+      .switch-knob {
+        position: absolute;
+        top: 4px;
+        left: 4px;
+        width: 20px;
+        height: 20px;
+        border-radius: 999px;
+        background: #d8dde2;
+      }
+      .switch-control.is-on .switch-knob {
+        transform: translateX(20px);
+        background: var(--green);
+      }
       .select-row {
         display: grid;
         grid-template-columns: minmax(160px, 1fr) auto;
@@ -939,6 +1063,8 @@ SETTINGS_TEMPLATE = """
         .select-row { grid-template-columns: 1fr; }
         .tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .action-row .button { width: 100%; min-width: 0; }
+        .switch-form,
+        .switch-control { width: 100%; }
         .detail-row { grid-template-columns: 1fr; gap: 4px; }
       }
     </style>
@@ -1005,16 +1131,17 @@ SETTINGS_TEMPLATE = """
                 <span class="label">Selected Room</span>
                 <h2>Source Transcription</h2>
               </div>
-              <span class="pill {% if selected.transcription_enabled %}good{% else %}warn{% endif %}">
-                {{ "Enabled" if selected.transcription_enabled else "Disabled" }}
-              </span>
             </div>
             <div class="action-row">
               <p>{{ selected.label }} audio is {{ "being transcribed" if selected.transcription_enabled else "not being transcribed" }}.</p>
-              <form method="post" action="{{ url_for('set_room_transcription', room_slug=selected.slug) }}">
+              <form class="switch-form" method="post" action="{{ url_for('set_room_transcription', room_slug=selected.slug) }}">
                 <input type="hidden" name="transcription_enabled" value="{{ "0" if selected.transcription_enabled else "1" }}">
-                <button class="button {% if selected.transcription_enabled %}warning{% else %}primary{% endif %}" type="submit">
-                  {{ "Turn Transcription Off" if selected.transcription_enabled else "Turn Transcription On" }}
+                <button class="switch-control {% if selected.transcription_enabled %}is-on{% else %}is-off{% endif %}" type="submit" aria-label="{{ "Turn transcription off" if selected.transcription_enabled else "Turn transcription on" }}">
+                  <span class="switch-copy">
+                    <span class="switch-label">{{ "On" if selected.transcription_enabled else "Off" }}</span>
+                    <span class="switch-caption">{{ "Transcribing" if selected.transcription_enabled else "Source idle" }}</span>
+                  </span>
+                  <span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span>
                 </button>
               </form>
             </div>
@@ -1026,21 +1153,18 @@ SETTINGS_TEMPLATE = """
                 <span class="label">Mandarin Audio</span>
                 <h2>Translation Output</h2>
               </div>
-              {% if selected.translation_output_supported %}
-                <span class="pill {% if selected.translation_output_enabled %}good{% else %}warn{% endif %}">
-                  {{ "Enabled" if selected.translation_output_enabled else "Disabled" }}
-                </span>
-              {% else %}
-                <span class="pill">Unavailable</span>
-              {% endif %}
             </div>
             {% if selected.translation_output_supported %}
               <div class="action-row">
                 <p>{{ selected.translation_target_language_label }} output is {{ "armed" if selected.translation_output_enabled else "muted" }}.</p>
-                <form method="post" action="{{ url_for('set_translation_output', room_slug=selected.slug) }}">
+                <form class="switch-form" method="post" action="{{ url_for('set_translation_output', room_slug=selected.slug) }}">
                   <input type="hidden" name="translation_output_enabled" value="{{ "0" if selected.translation_output_enabled else "1" }}">
-                  <button class="button {% if selected.translation_output_enabled %}warning{% else %}primary{% endif %}" type="submit">
-                    {{ "Turn Output Off" if selected.translation_output_enabled else "Turn Output On" }}
+                  <button class="switch-control {% if selected.translation_output_enabled %}is-on{% else %}is-off{% endif %}" type="submit" aria-label="{{ "Turn translation output off" if selected.translation_output_enabled else "Turn translation output on" }}">
+                    <span class="switch-copy">
+                      <span class="switch-label">{{ "On" if selected.translation_output_enabled else "Off" }}</span>
+                      <span class="switch-caption">{{ "Audio armed" if selected.translation_output_enabled else "Muted" }}</span>
+                    </span>
+                    <span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span>
                   </button>
                 </form>
               </div>
