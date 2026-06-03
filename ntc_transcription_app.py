@@ -556,29 +556,45 @@ SETTINGS_LOGIN_TEMPLATE = """
         margin: 0;
         font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
         color: var(--text);
-        background-image:
-          linear-gradient(180deg, rgba(5, 10, 18, 0.34), rgba(5, 10, 18, 0.84)),
+        background:
+          linear-gradient(180deg, rgba(5, 10, 18, 0.84), rgba(5, 10, 18, 0.94)),
           radial-gradient(circle at 12% 0%, rgba(143, 211, 255, 0.18), transparent 30rem),
           radial-gradient(circle at 96% 14%, rgba(116, 221, 180, 0.10), transparent 28rem),
-          url("{{ brand_background_url }}");
-        background-size: cover, auto, auto, min(1120px, 118vw) auto;
-        background-position: center, top left, top right, center;
-        background-repeat: no-repeat;
-        background-attachment: fixed, fixed, fixed, fixed;
+          #050913;
         min-height: 100vh;
         display: grid;
         place-items: center;
         padding: 16px;
+        overflow-x: hidden;
+        position: relative;
+        isolation: isolate;
       }
-      @supports (-webkit-touch-callout: none) {
-        body {
-          background-attachment: scroll, scroll, scroll, scroll;
-        }
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        z-index: 0;
+        pointer-events: none;
+        background: url("{{ brand_background_url }}") center / cover no-repeat;
+        opacity: 0.18;
+        filter: saturate(0.9) contrast(1.05);
+      }
+      body::after {
+        content: "";
+        position: fixed;
+        inset: 0;
+        z-index: 0;
+        pointer-events: none;
+        background:
+          linear-gradient(90deg, rgba(5, 10, 18, 0.68), transparent 32%, transparent 68%, rgba(5, 10, 18, 0.68)),
+          linear-gradient(180deg, rgba(5, 10, 18, 0.32), rgba(5, 10, 18, 0.72));
       }
       main {
         width: min(520px, calc(100vw - 32px));
         margin: 0 auto;
         padding: 0;
+        position: relative;
+        z-index: 1;
       }
       .shell {
         background: var(--panel);
@@ -723,26 +739,42 @@ SETTINGS_TEMPLATE = """
         margin: 0;
         color: var(--text);
         font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
-        background-image:
-          linear-gradient(180deg, rgba(5, 10, 18, 0.34), rgba(5, 10, 18, 0.84)),
+        background:
+          linear-gradient(180deg, rgba(5, 10, 18, 0.84), rgba(5, 10, 18, 0.94)),
           radial-gradient(circle at 12% 0%, rgba(143, 211, 255, 0.18), transparent 30rem),
           radial-gradient(circle at 96% 14%, rgba(116, 221, 180, 0.10), transparent 28rem),
-          url("{{ brand_background_url }}");
-        background-size: cover, auto, auto, min(1120px, 118vw) auto;
-        background-position: center, top left, top right, center;
-        background-repeat: no-repeat;
-        background-attachment: fixed, fixed, fixed, fixed;
+          #050913;
         min-height: 100vh;
+        overflow-x: hidden;
+        position: relative;
+        isolation: isolate;
       }
-      @supports (-webkit-touch-callout: none) {
-        body {
-          background-attachment: scroll, scroll, scroll, scroll;
-        }
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        z-index: 0;
+        pointer-events: none;
+        background: url("{{ brand_background_url }}") center / cover no-repeat;
+        opacity: 0.18;
+        filter: saturate(0.9) contrast(1.05);
+      }
+      body::after {
+        content: "";
+        position: fixed;
+        inset: 0;
+        z-index: 0;
+        pointer-events: none;
+        background:
+          linear-gradient(90deg, rgba(5, 10, 18, 0.68), transparent 32%, transparent 68%, rgba(5, 10, 18, 0.68)),
+          linear-gradient(180deg, rgba(5, 10, 18, 0.32), rgba(5, 10, 18, 0.72));
       }
       main {
         width: min(1320px, calc(100vw - 32px));
         margin: 0 auto;
         padding: 30px 0 44px;
+        position: relative;
+        z-index: 1;
       }
       .topbar {
         display: grid;
@@ -825,11 +857,11 @@ SETTINGS_TEMPLATE = """
         border-color: rgba(255, 209, 102, 0.34);
       }
       .tabs {
-        display: inline-grid;
+        display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 0.28rem;
-        width: min(520px, 100%);
-        margin: 1rem auto;
+        width: min(620px, 100%);
+        margin: 1rem auto 1.4rem;
         padding: 0.28rem;
         border: 1px solid var(--line);
         border-radius: 999px;
