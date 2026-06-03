@@ -239,6 +239,22 @@ class TranscriptionTests(unittest.TestCase):
                 0,
             )
 
+    def test_settings_marks_source_cleanup_as_stopping(self):
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute(
+                """
+                UPDATE source_runtime
+                SET desired_active = 1, is_ingesting = 0
+                WHERE host_slug = 'hp-envy-16-ad0xx'
+                """
+            )
+        self._login_settings()
+
+        response = self.client.get("/transcription/settings?room=room-a")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Stopping", response.data)
+
     def test_settings_can_update_supported_translation_controls(self):
         self._login_settings()
         output = self.client.post(

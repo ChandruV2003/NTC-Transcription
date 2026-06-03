@@ -38,6 +38,16 @@ def _csv_tuple(value: str, default: tuple[str, ...]) -> tuple[str, ...]:
     return items or default
 
 
+def _source_status(transcription_enabled: bool, source_requested: bool, source_ingesting: bool) -> tuple[str, str]:
+    if transcription_enabled:
+        if source_ingesting:
+            return "Live", "good"
+        return "Starting", "warn"
+    if source_ingesting or source_requested:
+        return "Stopping", "warn"
+    return "Idle", ""
+
+
 class TranscriptionStore:
     def __init__(self, db_path: str | None):
         self.db_path = Path(db_path or "/app/data/ntccast.db")
@@ -133,18 +143,28 @@ class TranscriptionStore:
         rooms = []
         for row in rows:
             stats = self.transcript_stats(row["slug"], window_minutes=180)
+            transcription_enabled = bool(row["transcription_enabled"])
+            source_requested = bool(row["desired_active"])
+            source_ingesting = bool(row["is_ingesting"])
+            source_status_label, source_status_tone = _source_status(
+                transcription_enabled,
+                source_requested,
+                source_ingesting,
+            )
             rooms.append(
                 {
                     "slug": row["slug"],
                     "label": row["label"] or row["slug"],
                     "room_enabled": bool(row["room_enabled"]),
-                    "transcription_enabled": bool(row["transcription_enabled"]),
+                    "transcription_enabled": transcription_enabled,
                     "host_slug": row["host_slug"] or "",
                     "host_label": row["host_label"] or "No source host",
                     "host_enabled": bool(row["host_enabled"]) if row["host_slug"] else False,
                     "manual_mode": row["manual_mode"] or "",
-                    "source_requested": bool(row["desired_active"]),
-                    "source_ingesting": bool(row["is_ingesting"]),
+                    "source_requested": source_requested,
+                    "source_ingesting": source_ingesting,
+                    "source_status_label": source_status_label,
+                    "source_status_tone": source_status_tone,
                     "current_device": row["current_device"] or "",
                     "last_seen_at": row["last_seen_at"] or "",
                     "last_error": row["last_error"] or "",
@@ -1132,7 +1152,7 @@ SETTINGS_TEMPLATE = """
         {% for room in rooms %}
           <a class="tab {% if selected and room.slug == selected.slug %}active{% endif %}" href="{{ url_for('transcription_settings', room=room.slug) }}">
             <span class="tab-title">{{ room.label }}</span>
-            <span class="dot {% if room.transcription_enabled %}good{% elif room.source_requested %}warn{% endif %}"></span>
+            <span class="dot {{ room.source_status_tone }}"></span>
           </a>
         {% endfor %}
       </nav>
@@ -1145,7 +1165,7 @@ SETTINGS_TEMPLATE = """
         </div>
         <div class="status-tile">
           <span class="label">Source</span>
-          <span class="status-value">{{ "Requested" if selected.source_requested else "Idle" }}</span>
+          <span class="status-value">{{ selected.source_status_label }}</span>
         </div>
         <div class="status-tile">
           <span class="label">Ingest</span>
@@ -1229,9 +1249,7 @@ SETTINGS_TEMPLATE = """
                 <span class="label">Room Agent</span>
                 <h2>Source Status</h2>
               </div>
-              <span class="pill {% if selected.source_ingesting %}good{% elif selected.source_requested %}warn{% else %}{% endif %}">
-                {% if selected.source_ingesting %}Live{% elif selected.source_requested %}Requested{% else %}Idle{% endif %}
-              </span>
+              <span class="pill {{ selected.source_status_tone }}">{{ selected.source_status_label }}</span>
             </div>
             <dl class="details">
               <div class="detail-row">
