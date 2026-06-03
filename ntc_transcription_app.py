@@ -557,7 +557,7 @@ SETTINGS_LOGIN_TEMPLATE = """
         font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
         color: var(--text);
         background:
-          linear-gradient(180deg, rgba(5, 10, 18, 0.84), rgba(5, 10, 18, 0.94)),
+          linear-gradient(180deg, rgba(5, 10, 18, 0.50), rgba(5, 10, 18, 0.88)),
           radial-gradient(circle at 12% 0%, rgba(143, 211, 255, 0.18), transparent 30rem),
           radial-gradient(circle at 96% 14%, rgba(116, 221, 180, 0.10), transparent 28rem),
           #050913;
@@ -576,18 +576,8 @@ SETTINGS_LOGIN_TEMPLATE = """
         z-index: 0;
         pointer-events: none;
         background: url("{{ brand_background_url }}") center / cover no-repeat;
-        opacity: 0.18;
-        filter: saturate(0.9) contrast(1.05);
-      }
-      body::after {
-        content: "";
-        position: fixed;
-        inset: 0;
-        z-index: 0;
-        pointer-events: none;
-        background:
-          linear-gradient(90deg, rgba(5, 10, 18, 0.68), transparent 32%, transparent 68%, rgba(5, 10, 18, 0.68)),
-          linear-gradient(180deg, rgba(5, 10, 18, 0.32), rgba(5, 10, 18, 0.72));
+        opacity: 0.31;
+        filter: saturate(1.08) contrast(1.04) brightness(0.9);
       }
       main {
         width: min(520px, calc(100vw - 32px));
@@ -740,7 +730,7 @@ SETTINGS_TEMPLATE = """
         color: var(--text);
         font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
         background:
-          linear-gradient(180deg, rgba(5, 10, 18, 0.84), rgba(5, 10, 18, 0.94)),
+          linear-gradient(180deg, rgba(5, 10, 18, 0.50), rgba(5, 10, 18, 0.88)),
           radial-gradient(circle at 12% 0%, rgba(143, 211, 255, 0.18), transparent 30rem),
           radial-gradient(circle at 96% 14%, rgba(116, 221, 180, 0.10), transparent 28rem),
           #050913;
@@ -756,18 +746,8 @@ SETTINGS_TEMPLATE = """
         z-index: 0;
         pointer-events: none;
         background: url("{{ brand_background_url }}") center / cover no-repeat;
-        opacity: 0.18;
-        filter: saturate(0.9) contrast(1.05);
-      }
-      body::after {
-        content: "";
-        position: fixed;
-        inset: 0;
-        z-index: 0;
-        pointer-events: none;
-        background:
-          linear-gradient(90deg, rgba(5, 10, 18, 0.68), transparent 32%, transparent 68%, rgba(5, 10, 18, 0.68)),
-          linear-gradient(180deg, rgba(5, 10, 18, 0.32), rgba(5, 10, 18, 0.72));
+        opacity: 0.31;
+        filter: saturate(1.08) contrast(1.04) brightness(0.9);
       }
       main {
         width: min(1320px, calc(100vw - 32px));
@@ -1152,35 +1132,33 @@ SETTINGS_TEMPLATE = """
         color: var(--muted);
       }
       @media (max-width: 1120px) {
-        .topbar {
-          grid-template-columns: 1fr;
-          justify-items: start;
-        }
-        .brand {
-          justify-items: start;
-          text-align: left;
-        }
-        .top-actions {
-          justify-self: start;
-        }
         .layout {
           grid-template-columns: 1fr;
         }
       }
       @media (max-width: 720px) {
         main { width: min(100vw - 24px, 1120px); padding: 18px 0 2rem; }
-        h1 { font-size: 2.1rem; }
-        .top-actions,
-        .top-actions form,
-        .top-actions .button { width: 100%; }
+        .topbar {
+          grid-template-columns: auto minmax(0, 1fr) auto;
+          gap: 0.45rem;
+        }
+        h1 { font-size: clamp(1.25rem, 6.4vw, 2.1rem); }
+        .sub { font-size: 0.76rem; line-height: 1.25; }
+        .eyebrow { font-size: 0.58rem; padding: 0.17rem 0.42rem; }
+        .button { padding: 0.52rem 0.58rem; font-size: 0.78rem; border-radius: 12px; }
+        .top-actions { gap: 0.4rem; }
         .status-strip,
         .meta-grid,
         .select-row { grid-template-columns: 1fr; }
         .tabs {
-          display: grid;
-          grid-template-columns: 1fr;
-          width: 100%;
-          border-radius: 22px;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          width: min(100%, 520px);
+          margin-inline: auto;
+        }
+        .tab {
+          gap: 0.45rem;
+          padding: 0.52rem 0.58rem;
+          min-height: 2.45rem;
         }
         .action-row .button { width: 100%; min-width: 0; }
         .switch-form,
