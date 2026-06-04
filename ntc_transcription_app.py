@@ -5,10 +5,12 @@ from __future__ import annotations
 import hmac
 import os
 import sqlite3
+import csv
+import io
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Flask, abort, jsonify, redirect, render_template_string, request, send_file, session, url_for
+from flask import Flask, Response, abort, jsonify, redirect, render_template_string, request, send_file, session, url_for
 
 
 ROOM_SLUG_ALIASES = {
@@ -51,6 +53,11 @@ def _source_status(transcription_enabled: bool, source_requested: bool, source_i
 class TranscriptionStore:
     def __init__(self, db_path: str | None):
         self.db_path = Path(db_path or "/app/data/ntccast.db")
+        try:
+            self._ensure_schema()
+        except sqlite3.OperationalError as exc:
+            if "unable to open database file" not in str(exc):
+                raise
 
     def _connect(self, *, readonly: bool = True):
         if readonly:
@@ -60,6 +67,32 @@ class TranscriptionStore:
             connection = sqlite3.connect(self.db_path, timeout=5)
         connection.row_factory = sqlite3.Row
         return connection
+
+    def _ensure_schema(self):
+        with self._connect(readonly=False) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS transcription_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    room_slug TEXT NOT NULL,
+                    host_slug TEXT,
+                    started_at TEXT NOT NULL,
+                    ended_at TEXT,
+                    trigger_mode TEXT NOT NULL DEFAULT 'manual',
+                    started_by TEXT NOT NULL DEFAULT '',
+                    ended_by TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_transcription_sessions_room_started
+                ON transcription_sessions(room_slug, started_at DESC);
+                """
+            )
+
+    def _table_columns(self, connection: sqlite3.Connection, table_name: str) -> set[str]:
+        try:
+            return {row["name"] for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()}
+        except sqlite3.Error:
+            return set()
 
     def get_room(self, room_slug: str):
         with self._connect(readonly=True) as connection:
@@ -183,6 +216,11 @@ class TranscriptionStore:
     def set_room_transcription_enabled(self, room_slug: str, enabled: bool) -> bool:
         timestamp = datetime.now(timezone.utc).isoformat()
         with self._connect(readonly=False) as connection:
+            previous = connection.execute(
+                "SELECT label, transcription_enabled FROM rooms WHERE slug = ?",
+                (room_slug,),
+            ).fetchone()
+            was_enabled = bool(previous["transcription_enabled"]) if previous else False
             cursor = connection.execute(
                 """
                 UPDATE rooms
@@ -193,6 +231,22 @@ class TranscriptionStore:
             )
             if not cursor.rowcount:
                 return False
+            if enabled and not was_enabled:
+                self._begin_transcription_session(
+                    connection,
+                    room_slug,
+                    trigger_mode="manual",
+                    actor="/transcription/settings",
+                    started_at=timestamp,
+                )
+            elif not enabled and was_enabled:
+                self._end_transcription_sessions(
+                    connection,
+                    room_slug,
+                    trigger_mode="manual",
+                    actor="/transcription/settings",
+                    ended_at=timestamp,
+                )
             self._record_event(
                 connection,
                 component="transcription",
@@ -255,6 +309,249 @@ class TranscriptionStore:
             "last_received_at": (row or {})["last_received_at"],
         }
 
+    def _begin_transcription_session(
+        self,
+        connection: sqlite3.Connection,
+        room_slug: str,
+        *,
+        host_slug: str | None = None,
+        trigger_mode: str = "manual",
+        actor: str = "",
+        started_at: str | None = None,
+    ) -> int:
+        active = connection.execute(
+            """
+            SELECT id
+            FROM transcription_sessions
+            WHERE room_slug = ?
+              AND trigger_mode = ?
+              AND ended_at IS NULL
+            ORDER BY started_at DESC
+            LIMIT 1
+            """,
+            (room_slug, trigger_mode),
+        ).fetchone()
+        if active:
+            return int(active["id"])
+        cursor = connection.execute(
+            """
+            INSERT INTO transcription_sessions (
+                room_slug, host_slug, started_at, trigger_mode, started_by
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                room_slug,
+                host_slug,
+                started_at or datetime.now(timezone.utc).isoformat(),
+                trigger_mode,
+                actor or trigger_mode,
+            ),
+        )
+        return int(cursor.lastrowid)
+
+    def _end_transcription_sessions(
+        self,
+        connection: sqlite3.Connection,
+        room_slug: str,
+        *,
+        trigger_mode: str | None = None,
+        actor: str = "",
+        ended_at: str | None = None,
+    ) -> int:
+        where = ["room_slug = ?", "ended_at IS NULL"]
+        where_params: list[str] = [room_slug]
+        if trigger_mode:
+            where.append("trigger_mode = ?")
+            where_params.append(trigger_mode)
+        timestamp = ended_at or datetime.now(timezone.utc).isoformat()
+        cursor = connection.execute(
+            f"""
+            UPDATE transcription_sessions
+            SET ended_at = ?,
+                ended_by = ?
+            WHERE {" AND ".join(where)}
+            """,
+            (timestamp, actor or trigger_mode or "system", *where_params),
+        )
+        return int(cursor.rowcount or 0)
+
+    def list_transcript_archives(self, visible_room_slugs: tuple[str, ...], *, limit: int = 12):
+        if not visible_room_slugs:
+            return []
+        placeholders = ",".join("?" for _ in visible_room_slugs)
+        now = datetime.now(timezone.utc).isoformat()
+        archives = []
+        with self._connect(readonly=True) as connection:
+            meeting_columns = self._table_columns(connection, "meeting_sessions")
+            if meeting_columns:
+                rows = connection.execute(
+                    f"""
+                    SELECT meeting_sessions.id,
+                           meeting_sessions.room_slug,
+                           meeting_sessions.host_slug,
+                           meeting_sessions.started_at,
+                           meeting_sessions.ended_at,
+                           meeting_sessions.trigger_mode,
+                           meeting_sessions.started_by,
+                           meeting_sessions.ended_by,
+                           rooms.label AS room_label
+                    FROM meeting_sessions
+                    JOIN rooms ON rooms.slug = meeting_sessions.room_slug
+                    WHERE meeting_sessions.room_slug IN ({placeholders})
+                    ORDER BY meeting_sessions.started_at DESC
+                    LIMIT ?
+                    """,
+                    (*visible_room_slugs, max(1, min(100, int(limit or 12)))),
+                ).fetchall()
+                archives.extend(
+                    self._archive_payload(connection, "meeting", row, now=now)
+                    for row in rows
+                )
+
+            rows = connection.execute(
+                f"""
+                SELECT transcription_sessions.id,
+                       transcription_sessions.room_slug,
+                       transcription_sessions.host_slug,
+                       transcription_sessions.started_at,
+                       transcription_sessions.ended_at,
+                       transcription_sessions.trigger_mode,
+                       transcription_sessions.started_by,
+                       transcription_sessions.ended_by,
+                       rooms.label AS room_label
+                FROM transcription_sessions
+                JOIN rooms ON rooms.slug = transcription_sessions.room_slug
+                WHERE transcription_sessions.room_slug IN ({placeholders})
+                ORDER BY transcription_sessions.started_at DESC
+                LIMIT ?
+                """,
+                (*visible_room_slugs, max(1, min(100, int(limit or 12)))),
+            ).fetchall()
+            archives.extend(
+                self._archive_payload(connection, "transcription", row, now=now)
+                for row in rows
+            )
+
+        archives.sort(key=lambda item: item["started_at"], reverse=True)
+        return archives[: max(1, min(100, int(limit or 12)))]
+
+    def get_transcript_archive(self, archive_kind: str, archive_id: int):
+        kind = "meeting" if archive_kind == "meeting" else "transcription"
+        table = "meeting_sessions" if kind == "meeting" else "transcription_sessions"
+        with self._connect(readonly=True) as connection:
+            if not self._table_columns(connection, table):
+                return None
+            row = connection.execute(
+                f"""
+                SELECT {table}.id,
+                       {table}.room_slug,
+                       {table}.host_slug,
+                       {table}.started_at,
+                       {table}.ended_at,
+                       {table}.trigger_mode,
+                       {table}.started_by,
+                       {table}.ended_by,
+                       rooms.label AS room_label
+                FROM {table}
+                JOIN rooms ON rooms.slug = {table}.room_slug
+                WHERE {table}.id = ?
+                """,
+                (max(1, int(archive_id or 0)),),
+            ).fetchone()
+            if not row:
+                return None
+            archive = self._archive_payload(connection, kind, row, now=datetime.now(timezone.utc).isoformat())
+            archive["transcripts"] = self._transcripts_between(
+                connection,
+                row["room_slug"],
+                started_at=row["started_at"],
+                ended_at=row["ended_at"] or datetime.now(timezone.utc).isoformat(),
+            )
+            return archive
+
+    def _archive_payload(self, connection: sqlite3.Connection, kind: str, row: sqlite3.Row, *, now: str):
+        ended_at = row["ended_at"] or now
+        stats = connection.execute(
+            """
+            SELECT COUNT(*) AS segment_count,
+                   COALESCE(SUM(LENGTH(text)), 0) AS character_count,
+                   MIN(received_at) AS first_received_at,
+                   MAX(received_at) AS last_received_at
+            FROM transcript_segments
+            WHERE room_slug = ?
+              AND received_at >= ?
+              AND received_at <= ?
+            """,
+            (row["room_slug"], row["started_at"], ended_at),
+        ).fetchone()
+        return {
+            "kind": kind,
+            "id": int(row["id"]),
+            "room_slug": row["room_slug"],
+            "room_label": row["room_label"],
+            "host_slug": row["host_slug"] or "",
+            "started_at": row["started_at"],
+            "ended_at": row["ended_at"],
+            "active": row["ended_at"] is None,
+            "trigger_mode": row["trigger_mode"],
+            "started_by": row["started_by"],
+            "ended_by": row["ended_by"],
+            "segment_count": int((stats or {})["segment_count"] or 0),
+            "character_count": int((stats or {})["character_count"] or 0),
+            "first_received_at": (stats or {})["first_received_at"],
+            "last_received_at": (stats or {})["last_received_at"],
+            "label": "Meeting" if kind == "meeting" else "Transcription",
+        }
+
+    def _transcripts_between(self, connection: sqlite3.Connection, room_slug: str, *, started_at: str, ended_at: str):
+        columns = self._table_columns(connection, "transcript_segments")
+        host_expr = "host_slug" if "host_slug" in columns else "''"
+        provider_expr = "provider" if "provider" in columns else "''"
+        model_expr = "model" if "model" in columns else "''"
+        started_expr = "started_at" if "started_at" in columns else "received_at"
+        ended_expr = "ended_at" if "ended_at" in columns else "received_at"
+        rows = connection.execute(
+            f"""
+            SELECT id,
+                   room_slug,
+                   {host_expr} AS host_slug,
+                   {provider_expr} AS provider,
+                   {model_expr} AS model,
+                   {started_expr} AS started_at,
+                   {ended_expr} AS ended_at,
+                   received_at,
+                   text,
+                   is_final
+            FROM transcript_segments
+            WHERE room_slug = ?
+              AND received_at >= ?
+              AND received_at <= ?
+            ORDER BY received_at ASC, id ASC
+            """,
+            (room_slug, started_at, ended_at),
+        ).fetchall()
+        session_start = _parse_iso_datetime(started_at)
+        transcripts = []
+        for row in rows:
+            received_at = row["received_at"]
+            transcripts.append(
+                {
+                    "id": int(row["id"]),
+                    "room_slug": row["room_slug"],
+                    "host_slug": row["host_slug"],
+                    "provider": row["provider"],
+                    "model": row["model"],
+                    "started_at": row["started_at"],
+                    "ended_at": row["ended_at"],
+                    "received_at": received_at,
+                    "elapsed": _elapsed_label(session_start, _parse_iso_datetime(received_at)),
+                    "text": row["text"],
+                    "is_final": bool(row["is_final"]),
+                }
+            )
+        return transcripts
+
     def _record_event(self, connection: sqlite3.Connection, *, component: str, event_type: str, message: str, room_slug: str, details: dict):
         try:
             connection.execute(
@@ -284,6 +581,26 @@ def _segment_payload(row: sqlite3.Row) -> dict:
         "text": row["text"],
         "is_final": bool(row["is_final"]),
     }
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _elapsed_label(start: datetime | None, current: datetime | None) -> str:
+    if not start or not current:
+        return ""
+    seconds = max(0, int((current - start).total_seconds()))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
 
 
 def create_app(test_config: dict | None = None, *, store: TranscriptionStore | None = None) -> Flask:
@@ -433,6 +750,7 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
             title=f"{app.config['NTC_TRANSCRIPTION_TITLE']} Settings",
             rooms=rooms,
             selected=selected,
+            transcript_archives=transcription_store.list_transcript_archives(_visible_rooms(), limit=8),
             language_options=TRANSLATION_LANGUAGE_OPTIONS,
             public_base=url_for("public_transcription"),
             logout_url=url_for("transcription_settings_logout"),
@@ -508,6 +826,60 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
             return redirect(url_for("transcription_settings", room=room["slug"], error="Translation room output is not configured for that room."))
         transcription_store.set_host_translation_target_language(room["host_slug"], target_language)
         return redirect(url_for("transcription_settings", room=room["slug"], message=f"Translation target set to {TRANSLATION_LANGUAGE_LABELS[target_language]}."))
+
+    @app.get("/transcription/settings/reports/<archive_kind>/<int:archive_id>")
+    def transcription_report(archive_kind: str, archive_id: int):
+        auth_response = _require_settings_auth()
+        if auth_response:
+            return auth_response
+        archive = transcription_store.get_transcript_archive(archive_kind, archive_id)
+        if not archive or archive["room_slug"] not in _visible_rooms():
+            return jsonify({"error": "unknown transcript archive"}), 404
+        return render_template_string(
+            TRANSCRIPTION_REPORT_TEMPLATE,
+            title=f"{archive['room_label']} Transcript",
+            archive=archive,
+            settings_url=url_for("transcription_settings", room=archive["room_slug"]),
+            csv_url=url_for("transcription_report_csv", archive_kind=archive["kind"], archive_id=archive["id"]),
+            brand_background_url=url_for("ntc_brand_background"),
+        )
+
+    @app.get("/transcription/settings/reports/<archive_kind>/<int:archive_id>.csv")
+    def transcription_report_csv(archive_kind: str, archive_id: int):
+        auth_response = _require_settings_auth()
+        if auth_response:
+            return auth_response
+        archive = transcription_store.get_transcript_archive(archive_kind, archive_id)
+        if not archive or archive["room_slug"] not in _visible_rooms():
+            return jsonify({"error": "unknown transcript archive"}), 404
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["Transcript", f"{archive['label']} #{archive['id']}"])
+        writer.writerow(["Room", archive["room_label"]])
+        writer.writerow(["Started", archive["started_at"]])
+        writer.writerow(["Ended", archive["ended_at"] or "Active"])
+        writer.writerow(["Segments", archive["segment_count"]])
+        writer.writerow(["Characters", archive["character_count"]])
+        writer.writerow([])
+        writer.writerow(["Elapsed", "Received", "Start", "End", "Host", "Provider", "Model", "Text"])
+        for transcript in archive["transcripts"]:
+            writer.writerow(
+                [
+                    transcript["elapsed"],
+                    transcript["received_at"],
+                    transcript["started_at"],
+                    transcript["ended_at"],
+                    transcript["host_slug"],
+                    transcript["provider"],
+                    transcript["model"],
+                    transcript["text"],
+                ]
+            )
+        response = Response(output.getvalue(), mimetype="text/csv")
+        response.headers["Content-Disposition"] = (
+            f'attachment; filename="ntc-transcript-{archive["kind"]}-{archive["id"]}.csv"'
+        )
+        return response
 
     @app.get("/transcribe")
     def legacy_public_transcribe():
@@ -1147,6 +1519,41 @@ SETTINGS_TEMPLATE = """
         min-width: 0;
         overflow-wrap: anywhere;
       }
+      .archive-list {
+        display: grid;
+        gap: 0.65rem;
+        margin-top: 0.85rem;
+      }
+      .archive-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 0.75rem;
+        align-items: center;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        padding: 0.82rem;
+        background: rgba(6, 13, 20, 0.64);
+      }
+      .archive-row strong {
+        display: block;
+        line-height: 1.2;
+      }
+      .archive-row span {
+        display: block;
+        margin-top: 0.25rem;
+        color: var(--muted);
+        font-size: 0.8rem;
+        line-height: 1.35;
+      }
+      .archive-actions {
+        display: flex;
+        gap: 0.45rem;
+        align-items: center;
+      }
+      .archive-actions .button {
+        padding: 0.5rem 0.62rem;
+        font-size: 0.78rem;
+      }
       .empty {
         border: 1px dashed var(--line);
         border-radius: 20px;
@@ -1195,6 +1602,12 @@ SETTINGS_TEMPLATE = """
         }
         .switch-copy {
           width: 5rem;
+        }
+        .archive-row {
+          grid-template-columns: 1fr;
+        }
+        .archive-actions .button {
+          flex: 1;
         }
         .detail-row { grid-template-columns: 1fr; gap: 4px; }
       }
@@ -1366,6 +1779,38 @@ SETTINGS_TEMPLATE = """
             </div>
             <p data-stat-field="latest">{% if selected.stats.last_received_at %}Latest line {{ selected.stats.last_received_at }}{% else %}No recent transcript lines.{% endif %}</p>
           </section>
+
+          <section class="card">
+            <div class="card-head">
+              <div>
+                <span class="label">Transcript Archive</span>
+                <h2>Recent Sessions</h2>
+              </div>
+            </div>
+            {% if transcript_archives %}
+              <div class="archive-list">
+                {% for archive in transcript_archives %}
+                  <div class="archive-row">
+                    <div>
+                      <strong>{{ archive.label }} #{{ archive.id }} &middot; {{ archive.room_label }}</strong>
+                      <span>
+                        {{ "Active" if archive.active else "Ended" }} &middot;
+                        {{ archive.segment_count }} segments &middot;
+                        {{ archive.character_count }} chars &middot;
+                        {{ archive.started_at }}
+                      </span>
+                    </div>
+                    <div class="archive-actions">
+                      <a class="button" href="{{ url_for('transcription_report', archive_kind=archive.kind, archive_id=archive.id) }}">Open</a>
+                      <a class="button" href="{{ url_for('transcription_report_csv', archive_kind=archive.kind, archive_id=archive.id) }}">CSV</a>
+                    </div>
+                  </div>
+                {% endfor %}
+              </div>
+            {% else %}
+              <p>No transcript sessions have been archived yet.</p>
+            {% endif %}
+          </section>
         </aside>
       </div>
       {% else %}
@@ -1494,6 +1939,243 @@ SETTINGS_TEMPLATE = """
         refreshStatus();
       })();
     </script>
+  </body>
+</html>
+"""
+
+
+TRANSCRIPTION_REPORT_TEMPLATE = """
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ title }}</title>
+    <style>
+      :root {
+        --bg: #07121e;
+        --surface: rgba(10, 21, 36, 0.94);
+        --surface-2: rgba(18, 34, 53, 0.9);
+        --text: #edf7ff;
+        --muted: #9fb2c6;
+        --line: rgba(143, 211, 255, 0.22);
+        --line-strong: rgba(143, 211, 255, 0.38);
+        --accent: #8fd3ff;
+        --good: #74ddb4;
+        --shadow: 0 22px 70px rgba(0, 0, 0, 0.34);
+        --mono: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+      }
+      * { box-sizing: border-box; }
+      html { min-height: 100%; background: #050913; }
+      body {
+        margin: 0;
+        color: var(--text);
+        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+        background:
+          linear-gradient(180deg, rgba(5, 10, 18, 0.58), rgba(5, 10, 18, 0.9)),
+          #050913;
+        min-height: 100vh;
+        position: relative;
+        isolation: isolate;
+      }
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        z-index: 0;
+        pointer-events: none;
+        background: url("{{ brand_background_url }}") center / cover no-repeat;
+        opacity: 0.24;
+        filter: saturate(1.08) contrast(1.04) brightness(0.9);
+      }
+      main {
+        width: min(1120px, calc(100vw - 32px));
+        margin: 0 auto;
+        padding: 30px 0 48px;
+        position: relative;
+        z-index: 1;
+      }
+      .topbar {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 1rem;
+        margin-bottom: 1rem;
+      }
+      h1 {
+        margin: 0.25rem 0 0;
+        font-size: clamp(2rem, 5vw, 3.5rem);
+        line-height: 0.96;
+      }
+      .eyebrow,
+      .label {
+        color: var(--accent);
+        font-family: var(--mono);
+        font-size: 0.72rem;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      .sub {
+        color: var(--muted);
+        margin: 0.5rem 0 0;
+      }
+      .actions {
+        display: flex;
+        gap: 0.55rem;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+      }
+      .button {
+        appearance: none;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--surface-2);
+        color: var(--text);
+        padding: 0.72rem 0.9rem;
+        text-decoration: none;
+        font: inherit;
+        font-weight: 800;
+        cursor: pointer;
+      }
+      .button:hover,
+      .button:focus-visible {
+        border-color: var(--line-strong);
+      }
+      .summary {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 0.7rem;
+        margin: 1rem 0;
+      }
+      .tile,
+      .transcript-line {
+        border: 1px solid var(--line);
+        background: var(--surface);
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(18px);
+      }
+      .tile {
+        border-radius: 18px;
+        padding: 0.9rem;
+      }
+      .tile strong {
+        display: block;
+        margin-top: 0.4rem;
+        font-size: 1.08rem;
+        overflow-wrap: anywhere;
+      }
+      .transcripts {
+        display: grid;
+        gap: 0.7rem;
+        margin-top: 1rem;
+      }
+      .transcript-line {
+        border-radius: 18px;
+        padding: 0.9rem 1rem;
+      }
+      .line-meta {
+        display: flex;
+        gap: 0.55rem;
+        flex-wrap: wrap;
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 0.76rem;
+        margin-bottom: 0.45rem;
+      }
+      .elapsed {
+        color: var(--good);
+        font-weight: 900;
+      }
+      .line-text {
+        font-size: 1.08rem;
+        line-height: 1.48;
+      }
+      .empty {
+        border: 1px dashed var(--line);
+        border-radius: 18px;
+        padding: 1rem;
+        color: var(--muted);
+      }
+      @media (max-width: 780px) {
+        main { width: min(100vw - 24px, 1120px); padding-top: 18px; }
+        .topbar { display: grid; }
+        .actions { justify-content: stretch; }
+        .button { flex: 1; text-align: center; }
+        .summary { grid-template-columns: 1fr; }
+      }
+      @media print {
+        body { background: #fff; color: #111; }
+        body::before,
+        .actions { display: none !important; }
+        main { width: 100%; padding: 0; }
+        .eyebrow,
+        .label,
+        .sub,
+        .line-meta,
+        .elapsed { color: #333; }
+        .tile,
+        .transcript-line {
+          background: #fff;
+          border-color: #ccc;
+          box-shadow: none;
+          break-inside: avoid;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header class="topbar">
+        <div>
+          <div class="eyebrow">{{ archive.label }} Transcript</div>
+          <h1>{{ archive.room_label }}</h1>
+          <p class="sub">{{ archive.started_at }}{% if archive.ended_at %} to {{ archive.ended_at }}{% else %} to Active{% endif %}</p>
+        </div>
+        <div class="actions">
+          <a class="button" href="{{ settings_url }}">Settings</a>
+          <a class="button" href="{{ csv_url }}">Download CSV</a>
+          <button class="button" type="button" onclick="window.print()">Print</button>
+        </div>
+      </header>
+
+      <section class="summary" aria-label="Transcript summary">
+        <div class="tile">
+          <span class="label">Session</span>
+          <strong>#{{ archive.id }} {{ archive.label }}</strong>
+        </div>
+        <div class="tile">
+          <span class="label">Status</span>
+          <strong>{{ "Active" if archive.active else "Ended" }}</strong>
+        </div>
+        <div class="tile">
+          <span class="label">Segments</span>
+          <strong>{{ archive.segment_count }}</strong>
+        </div>
+        <div class="tile">
+          <span class="label">Characters</span>
+          <strong>{{ archive.character_count }}</strong>
+        </div>
+      </section>
+
+      {% if archive.transcripts %}
+        <section class="transcripts">
+          {% for transcript in archive.transcripts %}
+            <article class="transcript-line">
+              <div class="line-meta">
+                <span class="elapsed">{{ transcript.elapsed }}</span>
+                <span>{{ transcript.received_at }}</span>
+                {% if transcript.provider %}<span>{{ transcript.provider }}</span>{% endif %}
+                {% if transcript.model %}<span>{{ transcript.model }}</span>{% endif %}
+              </div>
+              <div class="line-text">{{ transcript.text }}</div>
+            </article>
+          {% endfor %}
+        </section>
+      {% else %}
+        <section class="empty">No transcript lines were saved inside this session window.</section>
+      {% endif %}
+    </main>
   </body>
 </html>
 """

@@ -1,6 +1,7 @@
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ntc_transcription_app import create_app
@@ -68,6 +69,21 @@ def _create_test_db(path: Path):
                 received_at TEXT NOT NULL,
                 text TEXT NOT NULL,
                 is_final INTEGER NOT NULL DEFAULT 1
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE meeting_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                room_slug TEXT NOT NULL,
+                host_slug TEXT,
+                started_at TEXT NOT NULL,
+                ended_at TEXT,
+                trigger_mode TEXT NOT NULL DEFAULT 'system',
+                started_by TEXT NOT NULL DEFAULT '',
+                ended_by TEXT NOT NULL DEFAULT '',
+                transcription_autostarted INTEGER NOT NULL DEFAULT 0
             )
             """
         )
@@ -240,6 +256,37 @@ class TranscriptionTests(unittest.TestCase):
                 connection.execute("SELECT transcription_enabled FROM rooms WHERE slug = 'room-a'").fetchone()[0],
                 0,
             )
+
+    def test_manual_transcription_session_has_printable_report_and_csv(self):
+        self._login_settings()
+        self.client.post(
+            "/transcription/settings/rooms/room-a/transcription",
+            data={"transcription_enabled": "1"},
+            follow_redirects=True,
+        )
+        received_at = datetime.now(timezone.utc).isoformat()
+        _insert_segment(self.db_path, "room-a", "Archive transcript line.", received_at=received_at)
+        with sqlite3.connect(self.db_path) as connection:
+            session_id = connection.execute(
+                """
+                SELECT id
+                FROM transcription_sessions
+                WHERE room_slug = 'room-a'
+                  AND ended_at IS NULL
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ).fetchone()[0]
+
+        report = self.client.get(f"/transcription/settings/reports/transcription/{session_id}")
+        csv_response = self.client.get(f"/transcription/settings/reports/transcription/{session_id}.csv")
+
+        self.assertEqual(report.status_code, 200)
+        self.assertIn(b"Archive transcript line.", report.data)
+        self.assertIn(b"Download CSV", report.data)
+        self.assertEqual(csv_response.status_code, 200)
+        self.assertEqual(csv_response.mimetype, "text/csv")
+        self.assertIn(b"Archive transcript line.", csv_response.data)
 
     def test_settings_marks_source_cleanup_as_stopping(self):
         with sqlite3.connect(self.db_path) as connection:
