@@ -955,6 +955,7 @@ SETTINGS_LOGIN_TEMPLATE = """
           radial-gradient(circle at 96% 14%, rgba(116, 221, 180, 0.10), transparent 28rem),
           #050913;
         min-height: 100vh;
+        min-height: 100svh;
         display: grid;
         place-items: center;
         padding: 16px;
@@ -1001,7 +1002,7 @@ SETTINGS_LOGIN_TEMPLATE = """
         font-weight: 800;
       }
       h1 {
-        margin: 0.85rem 0 0.35rem;
+        margin: 0.98rem 0 0.45rem;
         font-size: clamp(2.25rem, 8vw, 3.55rem);
         line-height: 0.94;
         letter-spacing: 0;
@@ -1159,7 +1160,7 @@ SETTINGS_TEMPLATE = """
       }
       .brand {
         display: grid;
-        gap: 0.2rem;
+        gap: 0.42rem;
         justify-items: center;
         text-align: center;
       }
@@ -1330,6 +1331,26 @@ SETTINGS_TEMPLATE = """
         font-weight: 800;
         line-height: 1.1;
         overflow-wrap: anywhere;
+      }
+      .status-value.source {
+        display: inline-flex;
+        width: fit-content;
+        align-items: center;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 0.34rem 0.68rem;
+        background: rgba(143, 211, 255, 0.08);
+        color: var(--text);
+      }
+      .status-value.source.good {
+        border-color: rgba(116, 221, 180, 0.38);
+        background: rgba(116, 221, 180, 0.12);
+        color: #d8fff0;
+      }
+      .status-value.source.warn {
+        border-color: rgba(255, 183, 112, 0.38);
+        background: rgba(255, 183, 112, 0.12);
+        color: var(--warn);
       }
       .layout {
         display: grid;
@@ -1625,7 +1646,7 @@ SETTINGS_TEMPLATE = """
         <div class="brand">
           <span class="eyebrow">Control Panel</span>
           <h1>Transcription Settings</h1>
-          <div class="sub">Room source, transcription, and translation controls. WebCall stays separate.</div>
+          <div class="sub">Room source, transcription, and translation controls.</div>
         </div>
         <div class="top-actions">
           <form method="post" action="{{ logout_url }}">
@@ -1654,7 +1675,7 @@ SETTINGS_TEMPLATE = """
         </div>
         <div class="status-tile">
           <span class="label">Source</span>
-          <span class="status-value" data-status-field="source">{{ selected.source_status_label }}</span>
+          <span class="status-value source {{ selected.source_status_tone }}" data-status-field="source">{{ selected.source_status_label }}</span>
         </div>
         <div class="status-tile">
           <span class="label">Ingest</span>
@@ -1857,7 +1878,11 @@ SETTINGS_TEMPLATE = """
           if (!room) return;
 
           setText('[data-status-field="transcription"]', room.transcription_enabled ? "On" : "Off");
-          setText('[data-status-field="source"]', room.source_status_label || "Idle");
+          const statusSource = document.querySelector('[data-status-field="source"]');
+          if (statusSource) {
+            statusSource.textContent = room.source_status_label || "Idle";
+            setTone(statusSource, room.source_status_tone || "");
+          }
           setText('[data-status-field="ingest"]', room.source_ingesting ? "Running" : "Stopped");
           setText(
             '[data-status-field="output"]',
