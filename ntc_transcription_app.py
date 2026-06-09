@@ -1540,6 +1540,31 @@ SETTINGS_TEMPLATE = """
         min-width: 0;
         overflow-wrap: anywhere;
       }
+      .detail-pill {
+        display: inline-flex;
+        width: fit-content;
+        max-width: 100%;
+        align-items: center;
+        min-height: 30px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 0.34rem 0.58rem;
+        background: rgba(143, 211, 255, 0.08);
+        color: var(--text);
+        font-weight: 850;
+        line-height: 1.2;
+        overflow-wrap: anywhere;
+        white-space: normal;
+      }
+      .detail-pill.device {
+        border-color: rgba(143, 211, 255, 0.34);
+        color: #dff4ff;
+      }
+      .detail-pill.muted {
+        border-color: var(--line);
+        background: rgba(18, 34, 53, 0.68);
+        color: var(--muted);
+      }
       .archive-list {
         display: grid;
         gap: 0.65rem;
@@ -1764,11 +1789,11 @@ SETTINGS_TEMPLATE = """
             <dl class="details">
               <div class="detail-row">
                 <dt>Host</dt>
-                <dd data-source-detail="host">{{ selected.host_label }}</dd>
+                <dd><span class="detail-pill{% if not selected.host_slug %} muted{% endif %}" data-source-detail="host">{{ selected.host_label }}</span></dd>
               </div>
               <div class="detail-row">
                 <dt>Device</dt>
-                <dd data-source-detail="device">{{ selected.current_device or "No input selected" }}</dd>
+                <dd><span class="detail-pill device{% if not selected.current_device %} muted{% endif %}" data-source-detail="device">{{ selected.current_device or "No input selected" }}</span></dd>
               </div>
               <div class="detail-row">
                 <dt>Last Seen</dt>
@@ -1853,6 +1878,13 @@ SETTINGS_TEMPLATE = """
           if (element) element.textContent = value;
         }
 
+        function setDetailPill(selector, value, muted) {
+          const element = document.querySelector(selector);
+          if (!element) return;
+          element.textContent = value;
+          element.classList.toggle("muted", !!muted);
+        }
+
         function setTone(element, tone) {
           if (!element) return;
           element.classList.remove(...tones);
@@ -1896,8 +1928,8 @@ SETTINGS_TEMPLATE = """
           }
 
           setText("[data-source-summary]", `${room.label} audio is ${room.transcription_enabled ? "being transcribed" : "not being transcribed"}.`);
-          setText('[data-source-detail="host"]', room.host_label || "No source host");
-          setText('[data-source-detail="device"]', room.current_device || "No input selected");
+          setDetailPill('[data-source-detail="host"]', room.host_label || "No source host", !room.host_slug);
+          setDetailPill('[data-source-detail="device"]', room.current_device || "No input selected", !room.current_device);
           setText('[data-source-detail="last_seen"]', room.last_seen_at || "Not seen yet");
           const errorRow = document.querySelector("[data-source-error-row]");
           const errorText = document.querySelector('[data-source-detail="error"]');

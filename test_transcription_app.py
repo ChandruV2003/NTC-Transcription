@@ -227,6 +227,8 @@ class TranscriptionTests(unittest.TestCase):
         self.assertIn(b"Sign Out", response.data)
         self.assertIn(b"ntc-embossed-background.jpg", response.data)
         self.assertIn(b"switch-control", response.data)
+        self.assertIn(b"detail-pill", response.data)
+        self.assertIn(b'data-source-detail="device"', response.data)
         self.assertIn(b"data-status-url", response.data)
         self.assertIn(b"/api/internal/transcription/settings/status", response.data)
 
