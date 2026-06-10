@@ -44,10 +44,10 @@ def _source_status(transcription_enabled: bool, source_requested: bool, source_i
     if transcription_enabled:
         if source_ingesting:
             return "Live", "good"
-        return "Starting", "warn"
+        return "Starting", "bad"
     if source_ingesting or source_requested:
-        return "Stopping", "warn"
-    return "Idle", ""
+        return "Stopping", "bad"
+    return "Idle", "bad"
 
 
 class TranscriptionStore:
@@ -1556,14 +1556,15 @@ SETTINGS_TEMPLATE = """
         overflow-wrap: anywhere;
         white-space: normal;
       }
-      .detail-pill.device {
-        border-color: rgba(143, 211, 255, 0.34);
-        color: #dff4ff;
+      .detail-pill.active {
+        border-color: rgba(116, 221, 180, 0.44);
+        background: var(--good-soft);
+        color: #d8fff0;
       }
-      .detail-pill.muted {
-        border-color: var(--line);
-        background: rgba(18, 34, 53, 0.68);
-        color: var(--muted);
+      .detail-pill.inactive {
+        border-color: rgba(255, 155, 155, 0.38);
+        background: var(--bad-soft);
+        color: var(--bad);
       }
       .archive-list {
         display: grid;
@@ -1789,11 +1790,11 @@ SETTINGS_TEMPLATE = """
             <dl class="details">
               <div class="detail-row">
                 <dt>Host</dt>
-                <dd><span class="detail-pill{% if not selected.host_slug %} muted{% endif %}" data-source-detail="host">{{ selected.host_label }}</span></dd>
+                <dd><span class="detail-pill {% if selected.host_slug %}active{% else %}inactive{% endif %}" data-source-detail="host">{{ selected.host_label }}</span></dd>
               </div>
               <div class="detail-row">
                 <dt>Device</dt>
-                <dd><span class="detail-pill device{% if not selected.current_device %} muted{% endif %}" data-source-detail="device">{{ selected.current_device or "No input selected" }}</span></dd>
+                <dd><span class="detail-pill {% if selected.current_device %}active{% else %}inactive{% endif %}" data-source-detail="device">{{ selected.current_device or "No input selected" }}</span></dd>
               </div>
               <div class="detail-row">
                 <dt>Last Seen</dt>
@@ -1878,11 +1879,12 @@ SETTINGS_TEMPLATE = """
           if (element) element.textContent = value;
         }
 
-        function setDetailPill(selector, value, muted) {
+        function setDetailPill(selector, value, active) {
           const element = document.querySelector(selector);
           if (!element) return;
           element.textContent = value;
-          element.classList.toggle("muted", !!muted);
+          element.classList.toggle("active", !!active);
+          element.classList.toggle("inactive", !active);
         }
 
         function setTone(element, tone) {
@@ -1928,8 +1930,8 @@ SETTINGS_TEMPLATE = """
           }
 
           setText("[data-source-summary]", `${room.label} audio is ${room.transcription_enabled ? "being transcribed" : "not being transcribed"}.`);
-          setDetailPill('[data-source-detail="host"]', room.host_label || "No source host", !room.host_slug);
-          setDetailPill('[data-source-detail="device"]', room.current_device || "No input selected", !room.current_device);
+          setDetailPill('[data-source-detail="host"]', room.host_label || "No source host", !!room.host_slug);
+          setDetailPill('[data-source-detail="device"]', room.current_device || "No input selected", !!room.current_device);
           setText('[data-source-detail="last_seen"]', room.last_seen_at || "Not seen yet");
           const errorRow = document.querySelector("[data-source-error-row]");
           const errorText = document.querySelector('[data-source-detail="error"]');
@@ -2279,6 +2281,30 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
       }
       .block:not(:last-child) { opacity: 0.6; }
       .empty { opacity: 0.72; }
+      .word {
+        display: inline-block;
+        opacity: 1;
+        transform: translateY(0);
+      }
+      .word.is-new {
+        opacity: 0;
+        transform: translateY(0.24em);
+        animation: word-reveal 420ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+        animation-delay: var(--word-delay, 0ms);
+      }
+      @keyframes word-reveal {
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .word.is-new {
+          animation: none;
+          opacity: 1;
+          transform: none;
+        }
+      }
       @media (max-width: 720px) {
         main { padding: 16px; }
         .block,
@@ -2355,7 +2381,34 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
           return blocks.slice(-renderBlocks);
         }
 
-        function render() {
+        function appendWords(parent, text, animate, delayState) {
+          const parts = String(text || "").split(/(\\s+)/);
+          for (const part of parts) {
+            if (!part) continue;
+            if (/^\\s+$/.test(part)) {
+              parent.append(" ");
+              continue;
+            }
+            const word = document.createElement("span");
+            word.className = animate ? "word is-new" : "word";
+            word.textContent = part;
+            if (animate) {
+              word.style.setProperty("--word-delay", `${Math.min(delayState.index * 48, 1600)}ms`);
+              delayState.index += 1;
+            }
+            parent.appendChild(word);
+          }
+        }
+
+        function renderBlockText(block, blockSegments, animatedIds) {
+          const delayState = { index: 0 };
+          blockSegments.forEach((segment, index) => {
+            if (index) block.append(" ");
+            appendWords(block, segment.text, animatedIds.has(segment.id), delayState);
+          });
+        }
+
+        function render(animatedIds = new Set()) {
           const blocks = buildBlocks();
           transcript.replaceChildren();
           if (!blocks.length) {
@@ -2370,7 +2423,7 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
             const block = document.createElement("p");
             block.className = "block";
             block.dataset.segmentIds = blockSegments.map((segment) => segment.id).join(",");
-            block.textContent = blockSegments.map((segment) => segment.text).join(" ");
+            renderBlockText(block, blockSegments, animatedIds);
             transcript.appendChild(block);
           }
           window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
@@ -2380,7 +2433,8 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
         render();
 
         function appendSegment(segment) {
-          if (addSegment(segment)) render();
+          const id = String(segment.id || "");
+          if (addSegment(segment)) render(new Set([id]));
         }
 
         async function poll() {
