@@ -7,7 +7,7 @@ import os
 import sqlite3
 import csv
 import io
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import Flask, Response, abort, jsonify, redirect, render_template_string, request, send_file, session, url_for
@@ -616,11 +616,13 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
         NTC_TRANSCRIPTION_RENDER_LINES=int(os.getenv("NTC_TRANSCRIPTION_RENDER_LINES", "18")),
         NTC_TRANSCRIPTION_SETTINGS_AUTH_ENABLED=os.getenv("NTC_TRANSCRIPTION_SETTINGS_AUTH_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"},
         NTC_TRANSCRIPTION_SETTINGS_PASSWORD=os.getenv("NTC_TRANSCRIPTION_SETTINGS_PASSWORD", "") or os.getenv("NTC_ADMIN_PASSWORD", ""),
+        NTC_ADMIN_SESSION_HOURS=float(os.getenv("NTC_ADMIN_SESSION_HOURS", "8")),
         NTC_BRAND_BACKGROUND_PATH=os.getenv("NTC_BRAND_BACKGROUND_PATH", str(DEFAULT_BRAND_BACKGROUND_PATH)),
         SECRET_KEY=os.getenv("NTC_SECRET_KEY", "change-me"),
     )
     if test_config:
         app.config.update(test_config)
+    app.permanent_session_lifetime = timedelta(hours=max(1, float(app.config.get("NTC_ADMIN_SESSION_HOURS") or 8)))
 
     transcription_store = store or TranscriptionStore(app.config["NTC_DB_PATH"])
     app.transcription_store = transcription_store
@@ -637,7 +639,23 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
     def _settings_authorized() -> bool:
         if not app.config.get("NTC_TRANSCRIPTION_SETTINGS_AUTH_ENABLED", True):
             return True
-        return bool(session.get("ntc_transcription_settings"))
+        if not session.get("ntc_transcription_settings"):
+            return False
+        authenticated_at = session.get("ntc_transcription_settings_authenticated_at")
+        try:
+            authenticated = datetime.fromisoformat(str(authenticated_at).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            session.pop("ntc_transcription_settings", None)
+            session.pop("ntc_transcription_settings_authenticated_at", None)
+            session.modified = True
+            return False
+        timeout = timedelta(hours=max(1, float(app.config.get("NTC_ADMIN_SESSION_HOURS") or 8)))
+        if datetime.now(timezone.utc) - authenticated > timeout:
+            session.pop("ntc_transcription_settings", None)
+            session.pop("ntc_transcription_settings_authenticated_at", None)
+            session.modified = True
+            return False
+        return True
 
     def _require_settings_auth():
         if not _settings_authorized():
@@ -729,13 +747,16 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
                     error="Password was not accepted.",
                 )
             )
+        session.permanent = True
         session["ntc_transcription_settings"] = True
+        session["ntc_transcription_settings_authenticated_at"] = datetime.now(timezone.utc).isoformat()
         session.modified = True
         return redirect(request.form.get("next") or url_for("transcription_settings"))
 
     @app.post("/transcription/settings/logout")
     def transcription_settings_logout():
         session.pop("ntc_transcription_settings", None)
+        session.pop("ntc_transcription_settings_authenticated_at", None)
         session.modified = True
         return redirect(url_for("transcription_settings_login"))
 
