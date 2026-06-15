@@ -614,6 +614,8 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
         NTC_TRANSCRIPTION_INITIAL_LINES=int(os.getenv("NTC_TRANSCRIPTION_INITIAL_LINES", "30")),
         NTC_TRANSCRIPTION_API_LINES=int(os.getenv("NTC_TRANSCRIPTION_API_LINES", "80")),
         NTC_TRANSCRIPTION_RENDER_LINES=int(os.getenv("NTC_TRANSCRIPTION_RENDER_LINES", "18")),
+        NTC_TRANSCRIPTION_WORD_DELAY_MS=int(os.getenv("NTC_TRANSCRIPTION_WORD_DELAY_MS", "64")),
+        NTC_TRANSCRIPTION_WORD_DELAY_CAP_MS=int(os.getenv("NTC_TRANSCRIPTION_WORD_DELAY_CAP_MS", "2400")),
         NTC_TRANSCRIPTION_SETTINGS_AUTH_ENABLED=os.getenv("NTC_TRANSCRIPTION_SETTINGS_AUTH_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"},
         NTC_TRANSCRIPTION_SETTINGS_PASSWORD=os.getenv("NTC_TRANSCRIPTION_SETTINGS_PASSWORD", "") or os.getenv("NTC_ADMIN_PASSWORD", ""),
         NTC_ADMIN_SESSION_HOURS=float(os.getenv("NTC_ADMIN_SESSION_HOURS", "8")),
@@ -712,6 +714,8 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
             segments=recent_segments,
             poll_ms=app.config["NTC_TRANSCRIPTION_POLL_MS"],
             render_lines=app.config["NTC_TRANSCRIPTION_RENDER_LINES"],
+            word_delay_ms=app.config["NTC_TRANSCRIPTION_WORD_DELAY_MS"],
+            word_delay_cap_ms=app.config["NTC_TRANSCRIPTION_WORD_DELAY_CAP_MS"],
         )
 
     @app.get("/transcription")
@@ -2268,6 +2272,7 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ title }}</title>
+    <link rel="icon" href="data:,">
     <style>
       * { box-sizing: border-box; }
       html, body { min-height: 100%; }
@@ -2342,6 +2347,8 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
         data-room-slug="{{ room.slug }}"
         data-poll-ms="{{ poll_ms }}"
         data-render-lines="{{ render_lines }}"
+        data-word-delay-ms="{{ word_delay_ms }}"
+        data-word-delay-cap-ms="{{ word_delay_cap_ms }}"
       >
         <p class="empty" id="empty-state">Waiting for transcription.</p>
       </section>
@@ -2354,6 +2361,8 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
         const roomSlug = transcript.dataset.roomSlug;
         const pollMs = Number(transcript.dataset.pollMs || "1000");
         const renderBlocks = Math.max(1, Math.ceil(Number(transcript.dataset.renderLines || "18") / 3));
+        const wordDelayMs = Math.max(0, Number(transcript.dataset.wordDelayMs || "64"));
+        const wordDelayCapMs = Math.max(0, Number(transcript.dataset.wordDelayCapMs || "2400"));
         const initialSegments = JSON.parse(document.getElementById("initial-segments")?.textContent || "[]");
         const segments = [];
         const seen = new Set();
@@ -2414,7 +2423,7 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
             word.className = animate ? "word is-new" : "word";
             word.textContent = part;
             if (animate) {
-              word.style.setProperty("--word-delay", `${Math.min(delayState.index * 48, 1600)}ms`);
+              word.style.setProperty("--word-delay", `${Math.min(delayState.index * wordDelayMs, wordDelayCapMs)}ms`);
               delayState.index += 1;
             }
             parent.appendChild(word);
@@ -2453,9 +2462,13 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
         for (const segment of initialSegments) addSegment(segment);
         render();
 
-        function appendSegment(segment) {
-          const id = String(segment.id || "");
-          if (addSegment(segment)) render(new Set([id]));
+        function appendSegments(nextSegments) {
+          const animatedIds = new Set();
+          for (const segment of nextSegments || []) {
+            const id = String(segment.id || "");
+            if (addSegment(segment)) animatedIds.add(id);
+          }
+          if (animatedIds.size) render(animatedIds);
         }
 
         async function poll() {
@@ -2463,7 +2476,7 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
             const response = await fetch(`/api/public/transcription/${encodeURIComponent(roomSlug)}/segments?after_id=${lastId}`, { cache: "no-store" });
             if (response.ok) {
               const payload = await response.json();
-              for (const segment of payload.segments || []) appendSegment(segment);
+              appendSegments(payload.segments || []);
             }
           } finally {
             window.setTimeout(poll, Math.max(500, pollMs));
