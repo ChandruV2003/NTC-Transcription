@@ -173,8 +173,39 @@ class TranscriptionStore:
                 """,
                 visible_room_slugs,
             ).fetchall()
-        rooms = []
+        rows_by_room = {}
+        room_order = []
         for row in rows:
+            if row["slug"] not in rows_by_room:
+                rows_by_room[row["slug"]] = []
+                room_order.append(row["slug"])
+            rows_by_room[row["slug"]].append(row)
+
+        def source_sort_key(row):
+            return (
+                1 if row["is_ingesting"] else 0,
+                1 if row["desired_active"] else 0,
+                1 if row["current_device"] else 0,
+                row["last_seen_at"] or "",
+                1 if row["host_enabled"] else 0,
+                1 if row["host_slug"] else 0,
+                row["host_label"] or "",
+            )
+
+        rooms = []
+        for room_slug in room_order:
+            room_rows = rows_by_room[room_slug]
+            row = max(room_rows, key=source_sort_key)
+            translation_row = next(
+                (item for item in room_rows if item["host_slug"] in TRANSLATION_OUTPUT_HOST_SLUGS),
+                None,
+            )
+            translation_host_slug = translation_row["host_slug"] if translation_row else ""
+            translation_language = (
+                translation_row["translation_target_language"]
+                if translation_row
+                else row["translation_target_language"]
+            ) or "zh-CN"
             stats = self.transcript_stats(row["slug"], window_minutes=180)
             transcription_enabled = bool(row["transcription_enabled"])
             source_requested = bool(row["desired_active"])
@@ -201,12 +232,16 @@ class TranscriptionStore:
                     "current_device": row["current_device"] or "",
                     "last_seen_at": row["last_seen_at"] or "",
                     "last_error": row["last_error"] or "",
-                    "translation_output_supported": row["host_slug"] in TRANSLATION_OUTPUT_HOST_SLUGS,
-                    "translation_output_enabled": bool(row["translation_output_enabled"]) if row["host_slug"] else False,
-                    "translation_target_language": row["translation_target_language"] or "zh-CN",
+                    "translation_host_slug": translation_host_slug,
+                    "translation_host_label": (translation_row["host_label"] if translation_row else "") or "",
+                    "translation_output_supported": bool(translation_host_slug),
+                    "translation_output_enabled": bool(translation_row["translation_output_enabled"])
+                    if translation_row
+                    else False,
+                    "translation_target_language": translation_language,
                     "translation_target_language_label": TRANSLATION_LANGUAGE_LABELS.get(
-                        row["translation_target_language"] or "zh-CN",
-                        row["translation_target_language"] or "zh-CN",
+                        translation_language,
+                        translation_language,
                     ),
                     "stats": stats,
                 }
@@ -832,7 +867,7 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
             return redirect(url_for("transcription_settings", room=room["slug"], error="Translation room output is not configured for that room."))
         value = str(request.form.get("translation_output_enabled", "")).strip().lower()
         enabled = value in {"1", "true", "yes", "on"}
-        transcription_store.set_host_translation_output_enabled(room["host_slug"], enabled)
+        transcription_store.set_host_translation_output_enabled(room["translation_host_slug"], enabled)
         return redirect(url_for("transcription_settings", room=room["slug"], message=f"Translation output {'enabled' if enabled else 'disabled'} for {room['label']}."))
 
     @app.post("/transcription/settings/rooms/<room_slug>/translation-settings")
@@ -849,7 +884,7 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
             return redirect(url_for("transcription_settings", room=room["slug"], error="Choose a supported translation language."))
         if not room["translation_output_supported"]:
             return redirect(url_for("transcription_settings", room=room["slug"], error="Translation room output is not configured for that room."))
-        transcription_store.set_host_translation_target_language(room["host_slug"], target_language)
+        transcription_store.set_host_translation_target_language(room["translation_host_slug"], target_language)
         return redirect(url_for("transcription_settings", room=room["slug"], message=f"Translation target set to {TRANSLATION_LANGUAGE_LABELS[target_language]}."))
 
     @app.get("/transcription/settings/reports/<archive_kind>/<int:archive_id>")

@@ -342,6 +342,58 @@ class TranscriptionTests(unittest.TestCase):
         self.assertEqual(payload["selected"]["source_status_tone"], "good")
         self.assertTrue(payload["selected"]["source_ingesting"])
 
+    def test_settings_collapses_multiple_hosts_per_room(self):
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute("UPDATE rooms SET transcription_enabled = 1 WHERE slug = 'room-a'")
+            connection.execute(
+                """
+                INSERT INTO hosts (
+                    slug, label, room_slug, enabled, manual_mode, translation_output_enabled,
+                    translation_target_language, updated_at
+                )
+                VALUES ('ntc-dante-room-a', 'NTC-Dante Room A', 'room-a', 1, 'auto', 0, 'zh-CN', '')
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO source_runtime (
+                    host_slug, desired_active, is_ingesting, current_device, last_seen_at, last_error
+                )
+                VALUES ('ntc-dante-room-a', 1, 1, 'Dante Room A 1-2', '2026-06-24T21:00:00+00:00', '')
+                """
+            )
+        self._login_settings()
+
+        response = self.client.get("/transcription/settings?room=room-a")
+        status = self.client.get("/api/internal/transcription/settings/status?room=room-a")
+        toggle = self.client.post(
+            "/transcription/settings/rooms/room-a/translation-output",
+            data={"translation_output_enabled": "1"},
+            follow_redirects=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data.count(b'data-room-tab="room-a"'), 1)
+        self.assertEqual(response.data.count(b'data-room-tab="room-b"'), 1)
+        self.assertIn(b"NTC-Dante Room A", response.data)
+        self.assertIn(b"data-translation-switch", response.data)
+        self.assertEqual(status.status_code, 200)
+        payload = status.get_json()
+        self.assertEqual([room["slug"] for room in payload["rooms"]].count("room-a"), 1)
+        self.assertEqual(payload["selected"]["host_slug"], "ntc-dante-room-a")
+        self.assertEqual(payload["selected"]["translation_host_slug"], "hp-envy-16-ad0xx")
+        self.assertTrue(payload["selected"]["translation_output_supported"])
+        self.assertEqual(toggle.status_code, 200)
+        with sqlite3.connect(self.db_path) as connection:
+            hp_output = connection.execute(
+                "SELECT translation_output_enabled FROM hosts WHERE slug = 'hp-envy-16-ad0xx'"
+            ).fetchone()[0]
+            dante_output = connection.execute(
+                "SELECT translation_output_enabled FROM hosts WHERE slug = 'ntc-dante-room-a'"
+            ).fetchone()[0]
+        self.assertEqual(hp_output, 1)
+        self.assertEqual(dante_output, 0)
+
     def test_settings_can_update_supported_translation_controls(self):
         self._login_settings()
         output = self.client.post(
