@@ -16,8 +16,9 @@ from flask import Flask, Response, abort, jsonify, redirect, render_template_str
 ROOM_SLUG_ALIASES = {
     "study-room": "room-a",
     "meeting-hall": "room-b",
+    "convention": "convention-laptop",
 }
-DEFAULT_VISIBLE_ROOM_SLUGS = ("room-a", "room-b")
+DEFAULT_VISIBLE_ROOM_SLUGS = ("room-a", "room-b", "convention-laptop")
 TRANSLATION_LANGUAGE_OPTIONS = [
     {"code": "zh-CN", "label": "Mandarin Chinese"},
     {"code": "es", "label": "Spanish"},

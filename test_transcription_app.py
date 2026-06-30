@@ -89,7 +89,12 @@ def _create_test_db(path: Path):
         )
         connection.executemany(
             "INSERT INTO rooms (slug, label, enabled, transcription_enabled, updated_at) VALUES (?, ?, 1, 0, '')",
-            [("room-a", "Room A"), ("room-b", "Room B"), ("diagnostics", "Diagnostics")],
+            [
+                ("room-a", "Room A"),
+                ("room-b", "Room B"),
+                ("convention-laptop", "Convention Laptop"),
+                ("diagnostics", "Diagnostics"),
+            ],
         )
         connection.executemany(
             """
@@ -102,6 +107,7 @@ def _create_test_db(path: Path):
             [
                 ("hp-envy-16-ad0xx", "HP Envy", "room-a", 0),
                 ("hp-pavilion-14m-ba1xx", "HP Pavilion", "room-b", 0),
+                ("convention-laptop", "Convention Laptop", "convention-laptop", 0),
             ],
         )
         connection.executemany(
@@ -114,6 +120,7 @@ def _create_test_db(path: Path):
             [
                 ("hp-envy-16-ad0xx", 0, 0, "SQ 1&2", "2026-05-31T12:00:00+00:00"),
                 ("hp-pavilion-14m-ba1xx", 0, 0, "SQ 3&4", "2026-05-31T12:00:00+00:00"),
+                ("convention-laptop", 0, 0, "", "2026-05-31T12:00:00+00:00"),
             ],
         )
 
@@ -182,6 +189,16 @@ class TranscriptionTests(unittest.TestCase):
         self.assertNotIn(b"Live Caption Ingest", response.data)
         self.assertNotIn(b"Meeting live", response.data)
         self.assertNotIn(b"active_rooms", response.data)
+
+    def test_public_convention_alias_renders_convention_room(self):
+        self.app.config["NTC_TRANSCRIPTION_VISIBLE_ROOMS"] = "room-a,room-b,convention-laptop"
+        _insert_segment(self.db_path, "convention-laptop", "Convention transcription line.")
+
+        response = self.client.get("/transcription/convention")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Convention transcription line.", response.data)
+        self.assertIn(b'data-room-slug="convention-laptop"', response.data)
 
     def _login_settings(self, password: str = "settings-password", *, follow_redirects: bool = True):
         return self.client.post(

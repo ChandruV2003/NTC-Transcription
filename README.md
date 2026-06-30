@@ -19,7 +19,12 @@ This service is intentionally separate from WebCall and the internal Translator 
 - `/api/public/transcription/<room-slug>/segments`
 - `/api/internal/transcription/<room-slug>/segments`
 
-`/transcription` defaults to Room A. The legacy `/transcribe` page URLs redirect to `/transcription`, and the legacy public API path remains available as a compatibility alias. The APIs return only the recent live transcription window and are not transcript archives. The internal API is for the `NTC-Translator` container to read current transcript text over the Docker network.
+`/transcription` defaults to Room A. Room aliases include `room-a`, `room-b`, and
+`convention`, which maps to the `convention-laptop` room. The legacy `/transcribe`
+page URLs redirect to `/transcription`, and the legacy public API path remains
+available as a compatibility alias. The APIs return only the recent live
+transcription window and are not transcript archives. The internal API is for the
+`NTC-Translator` container to read current transcript text over the Docker network.
 
 ## Local Validation
 
