@@ -7,10 +7,13 @@ import os
 import sqlite3
 import csv
 import io
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import Flask, Response, abort, jsonify, redirect, render_template_string, request, send_file, session, url_for
+
+from ntc_transcription_source import install_source_api
 
 
 ROOM_SLUG_ALIASES = {
@@ -108,6 +111,219 @@ class TranscriptionStore:
         if not row:
             return None
         return {"slug": row["slug"], "label": row["label"] or row["slug"]}
+
+    def get_host(self, host_slug: str, *, include_secret: bool = False):
+        with self._connect(readonly=True) as connection:
+            host_columns = self._table_columns(connection, "hosts")
+            room_columns = self._table_columns(connection, "rooms")
+            runtime_columns = self._table_columns(connection, "source_runtime")
+
+            def host_expr(column: str, default: str = "''") -> str:
+                return f"hosts.{column}" if column in host_columns else f"{default} AS {column}"
+
+            def room_expr(column: str, default: str = "''") -> str:
+                return f"rooms.{column}" if column in room_columns else f"{default} AS {column}"
+
+            row = connection.execute(
+                f"""
+                SELECT hosts.slug,
+                       {host_expr("label")},
+                       {host_expr("room_slug")},
+                       {host_expr("enabled", "1")},
+                       {host_expr("manual_mode")},
+                       {host_expr("capture_mode", "'auto'")},
+                       {host_expr("capture_sample_rate_hz", "48000")},
+                       {host_expr("preferred_audio_pattern")},
+                       {host_expr("fallback_audio_pattern")},
+                       {host_expr("device_order_json", "'[]'")},
+                       {host_expr("heartbeat_token")},
+                       {host_expr("translation_output_enabled", "0")},
+                       {host_expr("translation_target_language", "'zh-CN'")},
+                       {room_expr("label", "hosts.room_slug")} AS room_label,
+                       {room_expr("enabled", "1")} AS room_enabled,
+                       {room_expr("transcription_enabled", "0")} AS room_transcription_enabled
+                FROM hosts
+                JOIN rooms ON rooms.slug = hosts.room_slug
+                WHERE hosts.slug = ?
+                """,
+                (host_slug,),
+            ).fetchone()
+            if not row:
+                return None
+            runtime = None
+            if runtime_columns:
+                runtime_select = []
+                for column, default in (
+                    ("current_device", "''"),
+                    ("device_list_json", "'[]'"),
+                    ("is_ingesting", "0"),
+                    ("last_error", "''"),
+                    ("desired_active", "0"),
+                    ("stream_profile", "''"),
+                    ("stream_channels", "1"),
+                    ("sample_rate_hz", "48000"),
+                    ("sample_bits", "0"),
+                    ("last_seen_at", "''"),
+                ):
+                    runtime_select.append(column if column in runtime_columns else f"{default} AS {column}")
+                runtime = connection.execute(
+                    f"""
+                    SELECT {", ".join(runtime_select)}
+                    FROM source_runtime
+                    WHERE host_slug = ?
+                    """,
+                    (host_slug,),
+                ).fetchone()
+
+        def runtime_value(column: str, default=None):
+            if not runtime:
+                return default
+            try:
+                return runtime[column]
+            except (KeyError, IndexError):
+                return default
+
+        host_enabled = bool(row["enabled"])
+        room_enabled = bool(row["room_enabled"])
+        transcription_desired = bool(host_enabled and room_enabled and row["room_transcription_enabled"])
+        payload = {
+            "slug": row["slug"],
+            "label": row["label"] or row["slug"],
+            "room_slug": row["room_slug"],
+            "room_label": row["room_label"] or row["room_slug"],
+            "enabled": host_enabled,
+            "room_enabled": room_enabled,
+            "room_transcription_enabled": bool(row["room_transcription_enabled"]),
+            "manual_mode": row["manual_mode"] or "auto",
+            "capture_mode": row["capture_mode"] or "auto",
+            "capture_sample_rate_hz": max(8000, int(row["capture_sample_rate_hz"] or 48000)),
+            "preferred_audio_pattern": row["preferred_audio_pattern"] or "",
+            "fallback_audio_pattern": row["fallback_audio_pattern"] or "",
+            "device_order": _json_list(row["device_order_json"] or "[]"),
+            "translation_output_enabled": bool(row["translation_output_enabled"]),
+            "translation_target_language": row["translation_target_language"] or "zh-CN",
+            "public_desired_active": False,
+            "transcription_desired_active": transcription_desired,
+            "desired_active": transcription_desired,
+            "runtime": {
+                "current_device": runtime_value("current_device", ""),
+                "device_list_json": runtime_value("device_list_json", "[]"),
+                "is_ingesting": bool(runtime_value("is_ingesting", 0)),
+                "last_error": runtime_value("last_error", ""),
+                "desired_active": bool(runtime_value("desired_active", 0)),
+                "stream_profile": runtime_value("stream_profile", ""),
+                "stream_channels": int(runtime_value("stream_channels", 1) or 1),
+                "sample_rate_hz": int(runtime_value("sample_rate_hz", 48000) or 48000),
+                "sample_bits": int(runtime_value("sample_bits", 0) or 0),
+                "last_seen_at": runtime_value("last_seen_at", ""),
+            },
+        }
+        if include_secret:
+            payload["heartbeat_token"] = row["heartbeat_token"] or ""
+        return payload
+
+    def record_source_heartbeat(
+        self,
+        host_slug: str,
+        *,
+        current_device: str,
+        devices,
+        is_ingesting: bool,
+        last_error: str,
+        desired_active: bool,
+        stream_profile: str = "",
+        stream_channels: int = 1,
+        sample_rate_hz: int = 48000,
+        sample_bits: int = 0,
+    ) -> None:
+        timestamp = datetime.now(timezone.utc).isoformat()
+        with self._connect(readonly=False) as connection:
+            columns = self._table_columns(connection, "source_runtime")
+            if not columns:
+                return
+            device_list = _dedupe_list(devices)
+            values_by_column = {
+                "host_slug": host_slug,
+                "current_device": (current_device or "").strip(),
+                "device_list_json": json.dumps(device_list),
+                "is_ingesting": 1 if is_ingesting else 0,
+                "last_error": (last_error or "").strip(),
+                "last_error_changed_at": timestamp if (last_error or "").strip() else "",
+                "desired_active": 1 if desired_active else 0,
+                "stream_profile": (stream_profile or "").strip(),
+                "stream_channels": max(1, int(stream_channels or 1)),
+                "sample_rate_hz": max(8000, int(sample_rate_hz or 48000)),
+                "sample_bits": max(0, int(sample_bits or 0)),
+                "last_seen_at": timestamp,
+            }
+            write_columns = [column for column in values_by_column if column in columns]
+            placeholders = ", ".join("?" for _ in write_columns)
+            updates = ", ".join(f"{column} = excluded.{column}" for column in write_columns if column != "host_slug")
+            connection.execute(
+                f"""
+                INSERT INTO source_runtime ({", ".join(write_columns)})
+                VALUES ({placeholders})
+                ON CONFLICT(host_slug) DO UPDATE SET {updates}
+                """,
+                tuple(values_by_column[column] for column in write_columns),
+            )
+
+    def record_source_event(self, host_slug: str, *, event_type: str, level: str, message: str, details: dict | None = None) -> None:
+        host = self.get_host(host_slug)
+        if not host:
+            return
+        with self._connect(readonly=False) as connection:
+            self._record_event(
+                connection,
+                component="source",
+                event_type=(event_type or "source-event").strip() or "source-event",
+                message=(message or "").strip() or event_type or "Source event",
+                room_slug=host["room_slug"],
+                details={"host_slug": host_slug, "level": level or "info", **(details or {})},
+            )
+
+    def record_transcript_segment(
+        self,
+        room_slug: str,
+        *,
+        host_slug: str | None = None,
+        provider: str = "",
+        model: str = "",
+        started_at: str | None = None,
+        ended_at: str | None = None,
+        received_at: str | None = None,
+        text: str = "",
+        is_final: bool = True,
+        source: str = "transcriber",
+    ) -> int:
+        normalized_text = (text or "").strip()
+        if not normalized_text:
+            return 0
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect(readonly=False) as connection:
+            columns = self._table_columns(connection, "transcript_segments")
+            values_by_column = {
+                "room_slug": room_slug,
+                "host_slug": host_slug or "",
+                "provider": (provider or "").strip(),
+                "model": (model or "").strip(),
+                "started_at": started_at or now,
+                "ended_at": ended_at or now,
+                "received_at": received_at or now,
+                "text": normalized_text,
+                "is_final": 1 if is_final else 0,
+                "source": (source or "transcriber").strip() or "transcriber",
+            }
+            write_columns = [column for column in values_by_column if column in columns]
+            placeholders = ", ".join("?" for _ in write_columns)
+            cursor = connection.execute(
+                f"""
+                INSERT INTO transcript_segments ({", ".join(write_columns)})
+                VALUES ({placeholders})
+                """,
+                tuple(values_by_column[column] for column in write_columns),
+            )
+            return int(cursor.lastrowid or 0)
 
     def health(self) -> bool:
         with self._connect(readonly=True) as connection:
@@ -604,9 +820,28 @@ class TranscriptionStore:
 
 
 def _json_details(details: dict) -> str:
-    import json
-
     return json.dumps(details, sort_keys=True, separators=(",", ":"))
+
+
+def _json_list(value: str | None) -> list[str]:
+    if not value:
+        return []
+    try:
+        payload = json.loads(value)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(payload, list):
+        return []
+    return [str(item) for item in payload if str(item or "").strip()]
+
+
+def _dedupe_list(values) -> list[str]:
+    result = []
+    for value in values or []:
+        text = str(value or "").strip()
+        if text and text not in result:
+            result.append(text)
+    return result
 
 
 def _segment_payload(row: sqlite3.Row) -> dict:
@@ -652,6 +887,28 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
         NTC_TRANSCRIPTION_RENDER_LINES=int(os.getenv("NTC_TRANSCRIPTION_RENDER_LINES", "18")),
         NTC_TRANSCRIPTION_WORD_DELAY_MS=int(os.getenv("NTC_TRANSCRIPTION_WORD_DELAY_MS", "64")),
         NTC_TRANSCRIPTION_WORD_DELAY_CAP_MS=int(os.getenv("NTC_TRANSCRIPTION_WORD_DELAY_CAP_MS", "2400")),
+        NTC_TRANSCRIPTION_SOURCE_PUBLIC_BASE_URL=os.getenv("NTC_TRANSCRIPTION_SOURCE_PUBLIC_BASE_URL", ""),
+        NTC_TRANSCRIPTION_HARD_DISABLED=os.getenv("NTC_TRANSCRIPTION_HARD_DISABLED", "0"),
+        NTC_TRANSCRIPTION_PROVIDER=os.getenv("NTC_TRANSCRIPTION_PROVIDER", "openai"),
+        NTC_TRANSCRIPTION_MODEL=os.getenv("NTC_TRANSCRIPTION_MODEL", ""),
+        NTC_TRANSCRIPTION_LOCAL_URL=os.getenv("NTC_TRANSCRIPTION_LOCAL_URL", ""),
+        NTC_TRANSCRIPTION_LOCAL_COMMAND=os.getenv("NTC_TRANSCRIPTION_LOCAL_COMMAND", ""),
+        NTC_TRANSCRIPTION_ALLOW_LOCAL_COMMAND=os.getenv("NTC_TRANSCRIPTION_ALLOW_LOCAL_COMMAND", "0"),
+        NTC_TRANSCRIPTION_CHUNK_SECONDS=float(os.getenv("NTC_TRANSCRIPTION_CHUNK_SECONDS", "3.2")),
+        NTC_TRANSCRIPTION_MIN_CHUNK_SECONDS=float(os.getenv("NTC_TRANSCRIPTION_MIN_CHUNK_SECONDS", "1.8")),
+        NTC_TRANSCRIPTION_MAX_CHUNK_SECONDS=float(os.getenv("NTC_TRANSCRIPTION_MAX_CHUNK_SECONDS", "6.0")),
+        NTC_TRANSCRIPTION_CHUNK_OVERLAP_SECONDS=float(os.getenv("NTC_TRANSCRIPTION_CHUNK_OVERLAP_SECONDS", "0.75")),
+        NTC_TRANSCRIPTION_QUEUE_SECONDS=float(os.getenv("NTC_TRANSCRIPTION_QUEUE_SECONDS", "120.0")),
+        NTC_TRANSCRIPTION_VAD_ENABLED=os.getenv("NTC_TRANSCRIPTION_VAD_ENABLED", "1"),
+        NTC_TRANSCRIPTION_VAD_FRAME_MS=float(os.getenv("NTC_TRANSCRIPTION_VAD_FRAME_MS", "100")),
+        NTC_TRANSCRIPTION_VAD_SILENCE_DB=float(os.getenv("NTC_TRANSCRIPTION_VAD_SILENCE_DB", "-46")),
+        NTC_TRANSCRIPTION_VAD_MIN_SILENCE_MS=float(os.getenv("NTC_TRANSCRIPTION_VAD_MIN_SILENCE_MS", "220")),
+        NTC_TRANSCRIPTION_BOUNDARY_SEARCH_SECONDS=float(os.getenv("NTC_TRANSCRIPTION_BOUNDARY_SEARCH_SECONDS", "1.8")),
+        NTC_TRANSCRIPTION_TIMEOUT_SECONDS=float(os.getenv("NTC_TRANSCRIPTION_TIMEOUT_SECONDS", "25.0")),
+        NTC_TRANSCRIPTION_MIN_RMS_DB=float(os.getenv("NTC_TRANSCRIPTION_MIN_RMS_DB", "-52")),
+        NTC_TRANSCRIPTION_PROMPT=os.getenv("NTC_TRANSCRIPTION_PROMPT", "Church service, Bible study, prayer meeting, sermon, NTC Newark."),
+        NTC_TRANSCRIPTION_LANGUAGE=os.getenv("NTC_TRANSCRIPTION_LANGUAGE", "en"),
+        NTC_TRANSCRIPTION_SUPPRESS_REGEX=os.getenv("NTC_TRANSCRIPTION_SUPPRESS_REGEX", r"^\s*[\[(][^\])]*(music|applause|silence|inaudible|bell|chime|dings?)[^\])]*[\])]\s*$"),
         NTC_TRANSCRIPTION_SETTINGS_AUTH_ENABLED=os.getenv("NTC_TRANSCRIPTION_SETTINGS_AUTH_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"},
         NTC_TRANSCRIPTION_SETTINGS_PASSWORD=os.getenv("NTC_TRANSCRIPTION_SETTINGS_PASSWORD", "") or os.getenv("NTC_ADMIN_PASSWORD", ""),
         NTC_ADMIN_SESSION_HOURS=float(os.getenv("NTC_ADMIN_SESSION_HOURS", "8")),
@@ -664,6 +921,7 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
 
     transcription_store = store or TranscriptionStore(app.config["NTC_DB_PATH"])
     app.transcription_store = transcription_store
+    install_source_api(app, transcription_store)
 
     def _visible_rooms() -> tuple[str, ...]:
         return _csv_tuple(app.config.get("NTC_TRANSCRIPTION_VISIBLE_ROOMS", ""), DEFAULT_VISIBLE_ROOM_SLUGS)

@@ -1,0 +1,853 @@
+"""Native source ingest and transcription worker for NTC Transcription."""
+
+from __future__ import annotations
+
+import hmac
+import json
+import math
+import os
+import queue
+import re
+import shlex
+import struct
+import subprocess
+import tempfile
+import threading
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
+
+import requests
+from flask import jsonify, request
+
+try:
+    import audioop  # type: ignore
+except ImportError:  # pragma: no cover - Python 3.13+ may not ship audioop
+    audioop = None
+
+
+INGEST_CHUNK_SIZE = 3072
+SOURCE_INGEST_READ_SIZE = 24576
+RECENT_CHUNK_BACKLOG = 96
+TRANSCRIPTION_STREAM_PROFILE = {
+    "channels": 1,
+    "sample_rate_hz": 16000,
+    "bits_per_sample": 16,
+}
+STREAM_PROFILES = {
+    "wav_pcm24": {
+        "mimetype": "audio/wav",
+        "channels": 1,
+        "sample_rate_hz": 48000,
+        "bits_per_sample": 24,
+    }
+}
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _config_enabled(app, name: str, *, default: bool = False) -> bool:
+    raw = str(app.config.get(name, "1" if default else "0")).strip().lower()
+    return raw not in {"", "0", "false", "no", "off"}
+
+
+def _extract_transcription_text(payload) -> str:
+    if payload is None:
+        return ""
+    if isinstance(payload, dict):
+        text = payload.get("text") or payload.get("transcript")
+        if text:
+            return str(text).strip()
+        segments = payload.get("segments")
+        if isinstance(segments, list):
+            return " ".join(str(segment.get("text", "")).strip() for segment in segments if isinstance(segment, dict)).strip()
+        return ""
+    if isinstance(payload, list):
+        return " ".join(_extract_transcription_text(item) for item in payload).strip()
+    raw_text = str(payload).strip()
+    if not raw_text:
+        return ""
+    try:
+        return _extract_transcription_text(json.loads(raw_text))
+    except (TypeError, ValueError):
+        pass
+    cleaned_lines = []
+    for line in raw_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        line = re.sub(r"^\[[0-9:. ]+-->\s*[0-9:. ]+\]\s*", "", line).strip()
+        if line:
+            cleaned_lines.append(line)
+    return " ".join(cleaned_lines).strip()
+
+
+_TRANSCRIPT_WORD_PATTERN = re.compile(r"[A-Za-z0-9]+(?:'[A-Za-z0-9]+)?")
+
+
+def _transcript_word_tokens(text: str) -> list[tuple[str, int, int]]:
+    return [(match.group(0).casefold(), match.start(), match.end()) for match in _TRANSCRIPT_WORD_PATTERN.finditer(text or "")]
+
+
+def _trim_overlapped_transcript_prefix(previous_text: str, current_text: str, *, min_words: int = 3, max_words: int = 16) -> str:
+    current = (current_text or "").strip()
+    if not previous_text or not current:
+        return current
+    previous_tokens = _transcript_word_tokens(previous_text)
+    current_tokens = _transcript_word_tokens(current)
+    max_match = min(len(previous_tokens), len(current_tokens), max(1, int(max_words)))
+    best_match = 0
+    for token_count in range(1, max_match + 1):
+        previous_tail = [token for token, _, _ in previous_tokens[-token_count:]]
+        current_head = [token for token, _, _ in current_tokens[:token_count]]
+        if previous_tail == current_head:
+            best_match = token_count
+    if best_match < max(1, int(min_words)):
+        return current
+    trim_end = current_tokens[best_match - 1][2]
+    return current[trim_end:].lstrip(" \t\r\n,.;:!?-")
+
+
+def _transcription_matches_suppressed_pattern(text: str, pattern: str) -> bool:
+    if not text or not pattern:
+        return False
+    try:
+        return bool(re.search(pattern, text, flags=re.IGNORECASE))
+    except re.error:
+        return False
+
+
+def _wav_file_bytes(*, channels: int, sample_rate_hz: int, bits_per_sample: int, payload: bytes) -> bytes:
+    block_align = channels * (bits_per_sample // 8)
+    byte_rate = sample_rate_hz * block_align
+    data_size = len(payload)
+    riff_size = 36 + data_size
+    return struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF",
+        riff_size,
+        b"WAVE",
+        b"fmt ",
+        16,
+        1,
+        channels,
+        sample_rate_hz,
+        byte_rate,
+        block_align,
+        bits_per_sample,
+        b"data",
+        data_size,
+    ) + payload
+
+
+def _pcm24le_to_int(sample: bytes) -> int:
+    value = sample[0] | (sample[1] << 8) | (sample[2] << 16)
+    if value & 0x800000:
+        value -= 1 << 24
+    return value
+
+
+def _pcm16le_rms_db(pcm_bytes: bytes) -> float | None:
+    usable = len(pcm_bytes) - (len(pcm_bytes) % 2)
+    if usable <= 0:
+        return None
+    payload = pcm_bytes[:usable]
+    if audioop is not None:
+        rms_value = audioop.rms(payload, 2)
+        if rms_value <= 0:
+            return None
+        return 20.0 * math.log10(max(float(rms_value) / 32767.0, 1e-8))
+    sum_squares = 0.0
+    sample_count = 0
+    for offset in range(0, usable, 2):
+        sample_value = struct.unpack_from("<h", payload, offset)[0]
+        sum_squares += float(sample_value) * float(sample_value)
+        sample_count += 1
+    if sample_count <= 0:
+        return None
+    return 20.0 * math.log10(max(math.sqrt(sum_squares / sample_count) / 32767.0, 1e-8))
+
+
+def _chunk_signal_stats(chunk: bytes, *, bits_per_sample: int) -> tuple[float | None, float | None]:
+    if bits_per_sample not in (16, 24):
+        return None, None
+    bytes_per_sample = bits_per_sample // 8
+    usable = len(chunk) - (len(chunk) % bytes_per_sample)
+    if usable <= 0:
+        return None, None
+    payload = chunk[:usable]
+    full_scale = 32767 if bits_per_sample == 16 else 8388607
+    if audioop is not None:
+        rms_value = audioop.rms(payload, bytes_per_sample)
+        peak_value = audioop.max(payload, bytes_per_sample)
+        if rms_value <= 0 and peak_value <= 0:
+            return None, None
+        rms_db = 20.0 * math.log10(max(float(rms_value) / full_scale, 1e-8)) if rms_value > 0 else None
+        peak_db = 20.0 * math.log10(max(float(peak_value) / full_scale, 1e-8)) if peak_value > 0 else None
+        return rms_db, peak_db
+    peak_value = 0
+    sum_squares = 0.0
+    sample_count = 0
+    for offset in range(0, usable, bytes_per_sample):
+        sample_value = _pcm24le_to_int(payload[offset:offset + 3]) if bits_per_sample == 24 else struct.unpack_from("<h", payload, offset)[0]
+        peak_value = max(peak_value, abs(sample_value))
+        sum_squares += float(sample_value) * float(sample_value)
+        sample_count += 1
+    if sample_count <= 0:
+        return None, None
+    rms_db = 20.0 * math.log10(max(math.sqrt(sum_squares / sample_count) / full_scale, 1e-8))
+    peak_db = 20.0 * math.log10(max(peak_value / full_scale, 1e-8))
+    return rms_db, peak_db
+
+
+def _align_pcm16_byte_count(byte_count: int) -> int:
+    return max(0, int(byte_count) - (int(byte_count) % 2))
+
+
+def _transcription_overlap_byte_count(*, cut_position: int, bytes_per_second: int, overlap_seconds: float, force: bool = False) -> int:
+    if force or overlap_seconds <= 0:
+        return 0
+    cut_position = _align_pcm16_byte_count(cut_position)
+    overlap_bytes = _align_pcm16_byte_count(max(0.0, float(bytes_per_second) * float(overlap_seconds)))
+    return min(overlap_bytes, max(0, cut_position - 2))
+
+
+def _find_transcription_cut_position(
+    pcm_bytes: bytes | bytearray,
+    *,
+    bytes_per_second: int,
+    target_seconds: float,
+    min_seconds: float,
+    max_seconds: float,
+    vad_frame_ms: float,
+    silence_db: float,
+    min_silence_ms: float,
+    search_seconds: float,
+    force: bool = False,
+) -> int | None:
+    usable = _align_pcm16_byte_count(len(pcm_bytes))
+    if usable <= 0:
+        return None
+    bytes_per_second = max(1, int(bytes_per_second or 1))
+    min_bytes = _align_pcm16_byte_count(bytes_per_second * max(1.0, float(min_seconds)))
+    target_bytes = _align_pcm16_byte_count(bytes_per_second * max(float(min_seconds), float(target_seconds)))
+    max_bytes = _align_pcm16_byte_count(bytes_per_second * max(float(target_seconds), float(max_seconds)))
+    search_bytes = _align_pcm16_byte_count(bytes_per_second * max(0.1, float(search_seconds)))
+    frame_bytes = max(2, _align_pcm16_byte_count(bytes_per_second * max(10.0, float(vad_frame_ms)) / 1000.0))
+    silence_frames_needed = max(1, math.ceil(max(1.0, float(min_silence_ms)) / max(10.0, float(vad_frame_ms))))
+    if force:
+        if usable < min_bytes:
+            return usable
+        max_bytes = min(max_bytes, usable)
+    elif usable < target_bytes:
+        return None
+    search_start = max(min_bytes, target_bytes - search_bytes)
+    search_end = min(usable, target_bytes + search_bytes)
+    silent_run_frames = 0
+    candidates: list[int] = []
+    for offset in range(search_start, search_end, frame_bytes):
+        frame_end = min(search_end, offset + frame_bytes)
+        rms_db = _pcm16le_rms_db(bytes(pcm_bytes[offset:frame_end]))
+        if rms_db is None or rms_db <= silence_db:
+            silent_run_frames += 1
+            if silent_run_frames >= silence_frames_needed:
+                candidates.append(_align_pcm16_byte_count(frame_end))
+        else:
+            silent_run_frames = 0
+    if candidates:
+        return min(candidates, key=lambda value: abs(value - target_bytes))
+    if usable >= max_bytes:
+        return min(usable, max_bytes)
+    if force:
+        return min(usable, max_bytes)
+    return None
+
+
+class PcmStreamTranscoder:
+    def __init__(self, *, source_channels: int, source_rate_hz: int, bits_per_sample: int, output_channels: int, output_rate_hz: int, output_bits_per_sample: int):
+        self.source_channels = max(1, int(source_channels or 1))
+        self.source_rate_hz = max(8000, int(source_rate_hz or 48000))
+        self.bits_per_sample = max(16, int(bits_per_sample or 24))
+        self.output_channels = max(1, int(output_channels or self.source_channels))
+        self.output_rate_hz = max(8000, int(output_rate_hz or self.source_rate_hz))
+        self.output_bits_per_sample = max(16, int(output_bits_per_sample or 16))
+        self._source_width = max(1, self.bits_per_sample // 8)
+        self._output_width = max(1, self.output_bits_per_sample // 8)
+        self._frame_width = self.source_channels * self._source_width
+        self._carry = b""
+        self._rate_state = None
+        self._sample_accumulator = 0
+
+    def transcode(self, chunk: bytes) -> bytes:
+        if not chunk:
+            return b""
+        data = self._carry + chunk
+        usable = len(data) - (len(data) % self._frame_width)
+        self._carry = data[usable:]
+        if usable <= 0:
+            return b""
+        payload = data[:usable]
+        if (
+            audioop is not None
+            and self.source_channels in (1, 2)
+            and self.output_channels in (1, 2)
+            and self._source_width in (1, 2, 3, 4)
+            and self._output_width in (1, 2, 3, 4)
+        ):
+            working = payload
+            channel_count = self.source_channels
+            if self.source_channels == 2 and self.output_channels == 1:
+                working = audioop.tomono(working, self._source_width, 0.5, 0.5)
+                channel_count = 1
+            elif self.source_channels == 1 and self.output_channels == 2:
+                working = audioop.tostereo(working, self._source_width, 1.0, 1.0)
+                channel_count = 2
+            if self.source_rate_hz != self.output_rate_hz:
+                working, self._rate_state = audioop.ratecv(
+                    working,
+                    self._source_width,
+                    channel_count,
+                    self.source_rate_hz,
+                    self.output_rate_hz,
+                    self._rate_state,
+                )
+            if self._source_width != self._output_width:
+                working = audioop.lin2lin(working, self._source_width, self._output_width)
+            return working
+        output = bytearray()
+        for offset in range(0, usable, self._frame_width):
+            frame = payload[offset:offset + self._frame_width]
+            self._sample_accumulator += self.output_rate_hz
+            if self._sample_accumulator < self.source_rate_hz:
+                continue
+            self._sample_accumulator -= self.source_rate_hz
+            frame_samples: list[int] = []
+            for channel_index in range(self.source_channels):
+                start = channel_index * self._source_width
+                raw_sample = frame[start:start + self._source_width]
+                if self.bits_per_sample == 24:
+                    sample_value = _pcm24le_to_int(raw_sample)
+                elif self.bits_per_sample == 16:
+                    sample_value = struct.unpack("<h", raw_sample)[0] << 8
+                else:
+                    continue
+                frame_samples.append(sample_value)
+            if not frame_samples:
+                continue
+            if self.source_channels == 2 and self.output_channels == 1:
+                frame_samples = [int(sum(frame_samples) / len(frame_samples))]
+            elif self.source_channels == 1 and self.output_channels == 2:
+                frame_samples = [frame_samples[0], frame_samples[0]]
+            for sample_value in frame_samples[: self.output_channels]:
+                scaled = max(-32768, min(32767, sample_value >> 8))
+                output.extend(struct.pack("<h", scaled))
+        return bytes(output)
+
+
+@dataclass
+class RoomState:
+    active_host_slug: str | None = None
+    active: bool = False
+    listeners: dict[int, queue.Queue] = field(default_factory=dict)
+    stream_channels: int = 1
+    sample_rate_hz: int = 48000
+    bits_per_sample: int = 24
+
+
+class TranscriptionStreamHub:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._rooms: dict[str, RoomState] = {}
+
+    def _get_room(self, room_slug: str) -> RoomState:
+        if room_slug not in self._rooms:
+            self._rooms[room_slug] = RoomState()
+        return self._rooms[room_slug]
+
+    def start_room(self, room_slug: str, host_slug: str, *, stream_channels: int, sample_rate_hz: int, bits_per_sample: int) -> None:
+        with self._lock:
+            room = self._get_room(room_slug)
+            room.active_host_slug = host_slug
+            room.active = True
+            room.stream_channels = max(1, int(stream_channels or 1))
+            room.sample_rate_hz = max(8000, int(sample_rate_hz or 48000))
+            room.bits_per_sample = max(16, int(bits_per_sample or 24))
+
+    def finish_room(self, room_slug: str, host_slug: str) -> None:
+        with self._lock:
+            room = self._get_room(room_slug)
+            if room.active_host_slug != host_slug:
+                return
+            room.active = False
+            room.active_host_slug = None
+            listeners = list(room.listeners.values())
+        for listener in listeners:
+            try:
+                listener.put_nowait(None)
+            except queue.Full:
+                pass
+
+    def publish_from(self, room_slug: str, host_slug: str, chunk: bytes) -> bool:
+        with self._lock:
+            room = self._get_room(room_slug)
+            if not room.active or room.active_host_slug != host_slug:
+                return False
+            listeners = list(room.listeners.values())
+        for listener in listeners:
+            try:
+                listener.put_nowait(chunk)
+            except queue.Full:
+                while True:
+                    try:
+                        listener.get_nowait()
+                    except queue.Empty:
+                        break
+                try:
+                    listener.put_nowait(chunk)
+                except queue.Full:
+                    continue
+        return True
+
+    def open_listener(self, room_slug: str, *, maxsize: int):
+        listener = queue.Queue(maxsize=max(1, int(maxsize or 1)))
+        listener_id = id(listener)
+        with self._lock:
+            self._get_room(room_slug).listeners[listener_id] = listener
+        return listener_id, listener
+
+    def close_listener(self, room_slug: str, listener_id: int) -> None:
+        with self._lock:
+            self._get_room(room_slug).listeners.pop(listener_id, None)
+
+
+@dataclass
+class TranscriptionWorkerState:
+    room_slug: str
+    host_slug: str
+    stop_event: threading.Event = field(default_factory=threading.Event)
+    worker_thread: threading.Thread | None = None
+    listener_id: int | None = None
+    last_error: str = ""
+
+
+def install_source_api(app, transcription_store) -> None:
+    stream_hub = TranscriptionStreamHub()
+    transcription_workers: dict[str, TranscriptionWorkerState] = {}
+    transcription_lock = threading.Lock()
+
+    def source_base_url() -> str:
+        configured = (app.config.get("NTC_TRANSCRIPTION_SOURCE_PUBLIC_BASE_URL") or "").strip().rstrip("/")
+        if configured:
+            return configured
+        forwarded_prefix = (request.headers.get("X-Forwarded-Prefix") or request.environ.get("SCRIPT_NAME") or "").strip().rstrip("/")
+        return request.url_root.rstrip("/") + forwarded_prefix
+
+    def provider() -> str:
+        configured = (app.config.get("NTC_TRANSCRIPTION_PROVIDER") or "openai").strip().lower()
+        return configured if configured in {"openai", "telnyx", "local_cmd", "local_http"} else "openai"
+
+    def model(current_provider: str) -> str:
+        configured = (app.config.get("NTC_TRANSCRIPTION_MODEL") or "").strip()
+        if configured:
+            return configured
+        if current_provider == "telnyx":
+            return "openai/whisper-large-v3-turbo"
+        if current_provider in {"local_cmd", "local_http"}:
+            return "local"
+        return "gpt-4o-mini-transcribe"
+
+    def local_url() -> str:
+        return (app.config.get("NTC_TRANSCRIPTION_LOCAL_URL") or "").strip()
+
+    def provider_ready(current_provider: str) -> bool:
+        if current_provider == "local_http":
+            return bool(local_url())
+        if current_provider == "local_cmd":
+            return _config_enabled(app, "NTC_TRANSCRIPTION_ALLOW_LOCAL_COMMAND") and bool(app.config.get("NTC_TRANSCRIPTION_LOCAL_COMMAND"))
+        if current_provider == "telnyx":
+            return bool(os.getenv("TELNYX_API_KEY", ""))
+        return bool(os.getenv("OPENAI_API_KEY", ""))
+
+    def source_desired(host: dict) -> bool:
+        if _config_enabled(app, "NTC_TRANSCRIPTION_HARD_DISABLED"):
+            return False
+        return bool(host.get("transcription_desired_active") and provider_ready(provider()))
+
+    def stream_descriptor(snapshot: dict | None = None):
+        runtime = (snapshot or {}).get("runtime") or {}
+        return {
+            "channels": max(1, int(runtime.get("stream_channels") or (2 if (snapshot or {}).get("capture_mode") == "stereo" else 1))),
+            "sample_rate_hz": max(8000, int(runtime.get("sample_rate_hz") or (snapshot or {}).get("capture_sample_rate_hz") or 48000)),
+            "bits_per_sample": max(16, int(runtime.get("sample_bits") or 24)),
+        }
+
+    def listener_maxsize(snapshot: dict | None = None) -> int:
+        descriptor = stream_descriptor(snapshot)
+        source_bytes_per_second = descriptor["channels"] * descriptor["sample_rate_hz"] * max(1, descriptor["bits_per_sample"] // 8)
+        queue_seconds = max(5.0, float(app.config.get("NTC_TRANSCRIPTION_QUEUE_SECONDS", 120.0)))
+        needed_chunks = math.ceil((source_bytes_per_second * queue_seconds) / float(INGEST_CHUNK_SIZE))
+        return max(128, min(65536, int(needed_chunks)))
+
+    def transcribe_audio_chunk_local_http(wav_bytes: bytes, *, current_model: str, prompt: str, language: str) -> str:
+        url = local_url()
+        if not url:
+            raise RuntimeError("local transcription URL is not configured")
+        timeout_seconds = max(5.0, float(app.config.get("NTC_TRANSCRIPTION_TIMEOUT_SECONDS", 25.0)))
+        params = {}
+        if current_model:
+            params["model"] = current_model
+        if language:
+            params["language"] = language
+        if prompt:
+            params["prompt"] = prompt
+        response = requests.post(
+            url,
+            params=params,
+            data=wav_bytes,
+            headers={"Content-Type": "audio/wav"},
+            timeout=timeout_seconds,
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(f"local transcription service failed: HTTP {response.status_code} {response.text[:240]}")
+        try:
+            return _extract_transcription_text(response.json())
+        except ValueError:
+            return _extract_transcription_text(response.text)
+
+    def transcribe_audio_chunk_local_cmd(wav_bytes: bytes, *, current_model: str, prompt: str, language: str) -> str:
+        if not _config_enabled(app, "NTC_TRANSCRIPTION_ALLOW_LOCAL_COMMAND"):
+            raise RuntimeError("local transcription command is disabled")
+        command_template = (app.config.get("NTC_TRANSCRIPTION_LOCAL_COMMAND") or "").strip()
+        if not command_template:
+            raise RuntimeError("local transcription command is not configured")
+        timeout_seconds = max(5.0, float(app.config.get("NTC_TRANSCRIPTION_TIMEOUT_SECONDS", 25.0)))
+        with tempfile.TemporaryDirectory(prefix="ntc-transcribe-") as temp_dir:
+            audio_path = os.path.join(temp_dir, "chunk.wav")
+            with open(audio_path, "wb") as handle:
+                handle.write(wav_bytes)
+            substitutions = {
+                "audio": shlex.quote(audio_path),
+                "model": shlex.quote(current_model),
+                "language": shlex.quote(language),
+                "prompt": shlex.quote(prompt),
+            }
+            command = command_template.format(**substitutions)
+            if "{audio}" not in command_template:
+                command = f"{command} {shlex.quote(audio_path)}"
+            completed = subprocess.run(
+                shlex.split(command),
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=timeout_seconds,
+            )
+        if completed.returncode != 0:
+            error_text = (completed.stderr or completed.stdout or "").strip()
+            raise RuntimeError(f"local transcription command failed: {error_text[:240]}")
+        return _extract_transcription_text(completed.stdout)
+
+    def transcribe_audio_chunk(wav_bytes: bytes, *, current_provider: str, current_model: str) -> str:
+        prompt = (app.config.get("NTC_TRANSCRIPTION_PROMPT") or "").strip()
+        language = (app.config.get("NTC_TRANSCRIPTION_LANGUAGE") or "").strip()
+        if current_provider == "local_http":
+            return transcribe_audio_chunk_local_http(wav_bytes, current_model=current_model, prompt=prompt, language=language)
+        if current_provider == "local_cmd":
+            return transcribe_audio_chunk_local_cmd(wav_bytes, current_model=current_model, prompt=prompt, language=language)
+        raise RuntimeError(f"{current_provider} transcription is not configured in ntc-transcription source API yet")
+
+    def run_transcription_worker(state: TranscriptionWorkerState, snapshot: dict):
+        current_provider = provider()
+        current_model = model(current_provider)
+        descriptor = stream_descriptor(snapshot)
+        transcriber = PcmStreamTranscoder(
+            source_channels=descriptor["channels"],
+            source_rate_hz=descriptor["sample_rate_hz"],
+            bits_per_sample=descriptor["bits_per_sample"],
+            output_channels=TRANSCRIPTION_STREAM_PROFILE["channels"],
+            output_rate_hz=TRANSCRIPTION_STREAM_PROFILE["sample_rate_hz"],
+            output_bits_per_sample=TRANSCRIPTION_STREAM_PROFILE["bits_per_sample"],
+        )
+        target_seconds = max(3.0, float(app.config.get("NTC_TRANSCRIPTION_CHUNK_SECONDS", 3.2)))
+        min_chunk_seconds = max(1.0, float(app.config.get("NTC_TRANSCRIPTION_MIN_CHUNK_SECONDS", 1.8)))
+        max_chunk_seconds = max(target_seconds, float(app.config.get("NTC_TRANSCRIPTION_MAX_CHUNK_SECONDS", 6.0)))
+        overlap_seconds = max(0.0, float(app.config.get("NTC_TRANSCRIPTION_CHUNK_OVERLAP_SECONDS", 0.75)))
+        overlap_seconds = min(overlap_seconds, max(0.0, min_chunk_seconds - 0.5), target_seconds / 2.0)
+        vad_enabled = _config_enabled(app, "NTC_TRANSCRIPTION_VAD_ENABLED", default=True)
+        bytes_per_second = TRANSCRIPTION_STREAM_PROFILE["sample_rate_hz"] * 2
+        flush_floor_seconds = min(2.0, max(1.0, min_chunk_seconds))
+        pcm_buffer = bytearray()
+        chunk_started_at = datetime.now(timezone.utc)
+        previous_transcript_text = ""
+        listener_id, listener = stream_hub.open_listener(state.room_slug, maxsize=listener_maxsize(snapshot))
+        state.listener_id = listener_id
+
+        def flush_buffer(*, force: bool = False):
+            nonlocal chunk_started_at, previous_transcript_text
+            if len(pcm_buffer) < bytes_per_second * flush_floor_seconds and not force:
+                return
+            if not pcm_buffer:
+                return
+            if vad_enabled:
+                cut_position = _find_transcription_cut_position(
+                    pcm_buffer,
+                    bytes_per_second=bytes_per_second,
+                    target_seconds=target_seconds,
+                    min_seconds=min_chunk_seconds,
+                    max_seconds=max_chunk_seconds,
+                    vad_frame_ms=max(10.0, float(app.config.get("NTC_TRANSCRIPTION_VAD_FRAME_MS", 100.0))),
+                    silence_db=float(app.config.get("NTC_TRANSCRIPTION_VAD_SILENCE_DB", -46.0)),
+                    min_silence_ms=max(1.0, float(app.config.get("NTC_TRANSCRIPTION_VAD_MIN_SILENCE_MS", 220.0))),
+                    search_seconds=max(0.1, float(app.config.get("NTC_TRANSCRIPTION_BOUNDARY_SEARCH_SECONDS", 1.8))),
+                    force=force,
+                )
+            else:
+                cut_position = _align_pcm16_byte_count(bytes_per_second * target_seconds)
+                if force:
+                    cut_position = _align_pcm16_byte_count(len(pcm_buffer))
+                elif len(pcm_buffer) < cut_position:
+                    return
+            if cut_position is None or cut_position <= 0:
+                return
+            payload = bytes(pcm_buffer[:cut_position])
+            overlap_bytes = _transcription_overlap_byte_count(
+                cut_position=cut_position,
+                bytes_per_second=bytes_per_second,
+                overlap_seconds=overlap_seconds,
+                force=force,
+            )
+            del pcm_buffer[:cut_position - overlap_bytes]
+            segment_started_at = chunk_started_at
+            duration_seconds = len(payload) / float(bytes_per_second)
+            segment_ended_at = segment_started_at + timedelta(seconds=duration_seconds)
+            chunk_started_at = segment_ended_at - timedelta(seconds=overlap_bytes / float(bytes_per_second))
+            rms_db, _ = _chunk_signal_stats(payload, bits_per_sample=16)
+            if rms_db is None or rms_db < float(app.config.get("NTC_TRANSCRIPTION_MIN_RMS_DB", -52.0)):
+                return
+            text = transcribe_audio_chunk(
+                _wav_file_bytes(
+                    channels=TRANSCRIPTION_STREAM_PROFILE["channels"],
+                    sample_rate_hz=TRANSCRIPTION_STREAM_PROFILE["sample_rate_hz"],
+                    bits_per_sample=TRANSCRIPTION_STREAM_PROFILE["bits_per_sample"],
+                    payload=payload,
+                ),
+                current_provider=current_provider,
+                current_model=current_model,
+            )
+            suppress_pattern = (app.config.get("NTC_TRANSCRIPTION_SUPPRESS_REGEX") or "").strip()
+            if not text or _transcription_matches_suppressed_pattern(text, suppress_pattern):
+                return
+            text = _trim_overlapped_transcript_prefix(previous_transcript_text, text)
+            if not text or _transcription_matches_suppressed_pattern(text, suppress_pattern):
+                return
+            received_at = _utc_now()
+            segment_id = transcription_store.record_transcript_segment(
+                state.room_slug,
+                host_slug=state.host_slug,
+                provider=current_provider,
+                model=current_model,
+                started_at=segment_started_at.isoformat(),
+                ended_at=segment_ended_at.isoformat(),
+                received_at=received_at,
+                text=text,
+            )
+            if segment_id:
+                previous_transcript_text = text
+
+        try:
+            while not state.stop_event.is_set():
+                try:
+                    chunk = listener.get(timeout=1.0)
+                except queue.Empty:
+                    continue
+                if chunk is None:
+                    break
+                converted = transcriber.transcode(chunk)
+                if converted:
+                    pcm_buffer.extend(converted)
+                while True:
+                    before_bytes = len(pcm_buffer)
+                    flush_buffer()
+                    if len(pcm_buffer) == before_bytes:
+                        break
+            while pcm_buffer:
+                before_bytes = len(pcm_buffer)
+                flush_buffer(force=True)
+                if len(pcm_buffer) == before_bytes:
+                    break
+        except Exception as exc:
+            state.last_error = str(exc)
+            app.logger.warning("transcription source worker failed room_slug=%s error=%s", state.room_slug, exc)
+        finally:
+            stream_hub.close_listener(state.room_slug, listener_id)
+
+    def start_room_transcription(room_slug: str, host_slug: str, snapshot: dict):
+        if not source_desired(snapshot):
+            return
+        stale_state = None
+        with transcription_lock:
+            existing = transcription_workers.get(room_slug)
+            if existing and existing.worker_thread and existing.worker_thread.is_alive() and not existing.stop_event.is_set():
+                return
+            if existing:
+                stale_state = transcription_workers.pop(room_slug, None)
+        if stale_state:
+            stale_state.stop_event.set()
+        with transcription_lock:
+            state = TranscriptionWorkerState(room_slug=room_slug, host_slug=host_slug)
+            state.worker_thread = threading.Thread(target=run_transcription_worker, args=(state, dict(snapshot or {})), daemon=True)
+            transcription_workers[room_slug] = state
+            state.worker_thread.start()
+
+    def stop_room_transcription(room_slug: str):
+        with transcription_lock:
+            state = transcription_workers.pop(room_slug, None)
+        if not state:
+            return
+        state.stop_event.set()
+        if state.listener_id is not None:
+            stream_hub.close_listener(room_slug, state.listener_id)
+        if state.worker_thread and state.worker_thread.is_alive():
+            state.worker_thread.join(timeout=2.0)
+
+    def auth_host_from_payload(payload: dict):
+        host_slug = (payload.get("host_slug") or "").strip()
+        token = (payload.get("token") or "").strip()
+        host = transcription_store.get_host(host_slug, include_secret=True)
+        if not host or not hmac.compare_digest(token, host.get("heartbeat_token", "")):
+            return None
+        return host
+
+    @app.post("/transcription/api/source/heartbeat")
+    @app.post("/api/source/heartbeat")
+    def transcription_source_heartbeat():
+        payload = request.get_json(silent=True) or {}
+        host = auth_host_from_payload(payload)
+        if not host:
+            return jsonify({"error": "unauthorized"}), 403
+        desired_active = source_desired(host)
+        transcription_store.record_source_heartbeat(
+            host["slug"],
+            current_device=(payload.get("current_device") or "").strip(),
+            devices=payload.get("devices") or [],
+            is_ingesting=bool(payload.get("is_ingesting")),
+            last_error=payload.get("last_error") or "",
+            desired_active=desired_active,
+            stream_profile=(payload.get("stream_profile") or "").strip(),
+            stream_channels=int(payload.get("stream_channels") or 1),
+            sample_rate_hz=int(payload.get("sample_rate_hz") or 48000),
+            sample_bits=int(payload.get("sample_bits") or 0),
+        )
+        refreshed = transcription_store.get_host(host["slug"], include_secret=True) or host
+        desired_active = source_desired(refreshed)
+        base_url = source_base_url()
+        token = quote(refreshed.get("heartbeat_token", ""), safe="")
+        host_slug = quote(refreshed["slug"], safe="")
+        return jsonify(
+            {
+                "ok": True,
+                "project": "ntc-transcription",
+                "desired_active": desired_active,
+                "public_desired_active": False,
+                "transcription_desired_active": desired_active,
+                "room_slug": refreshed["room_slug"],
+                "room_label": refreshed["room_label"],
+                "device_order": refreshed.get("device_order", []),
+                "preferred_audio_pattern": refreshed.get("preferred_audio_pattern", ""),
+                "fallback_audio_pattern": refreshed.get("fallback_audio_pattern", ""),
+                "capture_mode": refreshed.get("capture_mode", "auto"),
+                "capture_sample_rate_hz": int(refreshed.get("capture_sample_rate_hz") or 48000),
+                "stream_profile": "wav_pcm24",
+                "source_command": None,
+                "ingest_url": f"{base_url}/api/source/ingest/{host_slug}?token={token}",
+            }
+        )
+
+    @app.post("/transcription/api/source/event")
+    @app.post("/api/source/event")
+    def transcription_source_event():
+        payload = request.get_json(silent=True) or {}
+        host = auth_host_from_payload(payload)
+        if not host:
+            return jsonify({"error": "unauthorized"}), 403
+        transcription_store.record_source_event(
+            host["slug"],
+            event_type=payload.get("event_type") or "source-event",
+            level=payload.get("level") or "info",
+            message=payload.get("message") or "",
+            details=payload.get("details") if isinstance(payload.get("details"), dict) else {},
+        )
+        return jsonify({"ok": True})
+
+    @app.post("/transcription/api/source/ingest/<host_slug>")
+    @app.post("/api/source/ingest/<host_slug>")
+    def transcription_source_ingest(host_slug: str):
+        token = (request.args.get("token") or "").strip()
+        host = transcription_store.get_host(host_slug, include_secret=True)
+        if not host or not hmac.compare_digest(token, host.get("heartbeat_token", "")):
+            return jsonify({"error": "unauthorized"}), 403
+        if not source_desired(host):
+            transcription_store.record_source_heartbeat(
+                host_slug,
+                current_device=(host.get("runtime") or {}).get("current_device", ""),
+                devices=[],
+                is_ingesting=False,
+                last_error="Transcription is not requested or transcription provider is unavailable.",
+                desired_active=False,
+                stream_profile="wav_pcm24",
+                stream_channels=1,
+                sample_rate_hz=48000,
+                sample_bits=24,
+            )
+            return jsonify({"error": "transcription not requested"}), 409
+        runtime = host.get("runtime") or {}
+        stream_settings = {
+            "stream_channels": max(1, int(runtime.get("stream_channels") or (2 if host.get("capture_mode") == "stereo" else 1))),
+            "sample_rate_hz": max(8000, int(runtime.get("sample_rate_hz") or host.get("capture_sample_rate_hz") or 48000)),
+            "bits_per_sample": max(16, int(runtime.get("sample_bits") or 24)),
+        }
+        room_slug = host["room_slug"]
+        stream_hub.start_room(room_slug, host_slug, **stream_settings)
+        transcription_store.record_source_heartbeat(
+            host_slug,
+            current_device=runtime.get("current_device", ""),
+            devices=[],
+            is_ingesting=True,
+            last_error="",
+            desired_active=True,
+            stream_profile="wav_pcm24",
+            stream_channels=stream_settings["stream_channels"],
+            sample_rate_hz=stream_settings["sample_rate_hz"],
+            sample_bits=stream_settings["bits_per_sample"],
+        )
+        start_room_transcription(room_slug, host_slug, transcription_store.get_host(host_slug) or host)
+        try:
+            while True:
+                chunk = request.stream.read(SOURCE_INGEST_READ_SIZE)
+                if not chunk:
+                    break
+                if not stream_hub.publish_from(room_slug, host_slug, chunk):
+                    break
+        finally:
+            stream_hub.finish_room(room_slug, host_slug)
+            stop_room_transcription(room_slug)
+            transcription_store.record_source_heartbeat(
+                host_slug,
+                current_device=runtime.get("current_device", ""),
+                devices=[],
+                is_ingesting=False,
+                last_error="",
+                desired_active=source_desired(transcription_store.get_host(host_slug) or host),
+                stream_profile="wav_pcm24",
+                stream_channels=stream_settings["stream_channels"],
+                sample_rate_hz=stream_settings["sample_rate_hz"],
+                sample_bits=stream_settings["bits_per_sample"],
+            )
+        return jsonify({"ok": True})
+
+    app.extensions["ntc_transcription_source"] = {
+        "stream_hub": stream_hub,
+        "workers": transcription_workers,
+    }

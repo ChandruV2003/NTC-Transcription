@@ -28,6 +28,12 @@ def _create_test_db(path: Path):
                 room_slug TEXT NOT NULL,
                 enabled INTEGER NOT NULL DEFAULT 1,
                 manual_mode TEXT NOT NULL DEFAULT 'auto',
+                capture_mode TEXT NOT NULL DEFAULT 'auto',
+                capture_sample_rate_hz INTEGER NOT NULL DEFAULT 48000,
+                preferred_audio_pattern TEXT NOT NULL DEFAULT '',
+                fallback_audio_pattern TEXT NOT NULL DEFAULT '',
+                device_order_json TEXT NOT NULL DEFAULT '[]',
+                heartbeat_token TEXT NOT NULL DEFAULT '',
                 translation_output_enabled INTEGER NOT NULL DEFAULT 0,
                 translation_target_language TEXT NOT NULL DEFAULT 'zh-CN',
                 updated_at TEXT NOT NULL DEFAULT ''
@@ -41,8 +47,14 @@ def _create_test_db(path: Path):
                 desired_active INTEGER NOT NULL DEFAULT 0,
                 is_ingesting INTEGER NOT NULL DEFAULT 0,
                 current_device TEXT NOT NULL DEFAULT '',
+                device_list_json TEXT NOT NULL DEFAULT '[]',
                 last_seen_at TEXT NOT NULL DEFAULT '',
-                last_error TEXT NOT NULL DEFAULT ''
+                last_error TEXT NOT NULL DEFAULT '',
+                last_error_changed_at TEXT NOT NULL DEFAULT '',
+                stream_profile TEXT NOT NULL DEFAULT '',
+                stream_channels INTEGER NOT NULL DEFAULT 1,
+                sample_rate_hz INTEGER NOT NULL DEFAULT 48000,
+                sample_bits INTEGER NOT NULL DEFAULT 0
             )
             """
         )
@@ -66,9 +78,15 @@ def _create_test_db(path: Path):
             CREATE TABLE transcript_segments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 room_slug TEXT NOT NULL,
+                host_slug TEXT NOT NULL DEFAULT '',
+                provider TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL DEFAULT '',
+                started_at TEXT NOT NULL DEFAULT '',
+                ended_at TEXT NOT NULL DEFAULT '',
                 received_at TEXT NOT NULL,
                 text TEXT NOT NULL,
-                is_final INTEGER NOT NULL DEFAULT 1
+                is_final INTEGER NOT NULL DEFAULT 1,
+                source TEXT NOT NULL DEFAULT 'transcriber'
             )
             """
         )
@@ -100,14 +118,14 @@ def _create_test_db(path: Path):
             """
             INSERT INTO hosts (
                 slug, label, room_slug, enabled, manual_mode, translation_output_enabled,
-                translation_target_language, updated_at
+                translation_target_language, heartbeat_token, updated_at
             )
-            VALUES (?, ?, ?, 1, 'auto', ?, 'zh-CN', '')
+            VALUES (?, ?, ?, 1, 'auto', ?, 'zh-CN', ?, '')
             """,
             [
-                ("hp-envy-16-ad0xx", "HP Envy", "room-a", 0),
-                ("hp-pavilion-14m-ba1xx", "HP Pavilion", "room-b", 0),
-                ("convention-laptop", "Convention Laptop", "convention-laptop", 0),
+                ("hp-envy-16-ad0xx", "HP Envy", "room-a", 0, "room-a-token"),
+                ("hp-pavilion-14m-ba1xx", "HP Pavilion", "room-b", 0, "room-b-token"),
+                ("convention-laptop", "Convention Laptop", "convention-laptop", 0, "convention-token"),
             ],
         )
         connection.executemany(
@@ -149,6 +167,9 @@ class TranscriptionTests(unittest.TestCase):
                 "NTC_TRANSCRIPTION_VISIBLE_ROOMS": "room-a,room-b",
                 "NTC_TRANSCRIPTION_DEFAULT_ROOM": "room-a",
                 "NTC_TRANSCRIPTION_SETTINGS_PASSWORD": "settings-password",
+                "NTC_TRANSCRIPTION_PROVIDER": "local_http",
+                "NTC_TRANSCRIPTION_LOCAL_URL": "http://whisper.test/transcribe",
+                "NTC_TRANSCRIPTION_SOURCE_PUBLIC_BASE_URL": "https://ntcnas.myftp.org/transcription",
                 "SECRET_KEY": "test-secret",
             }
         )
@@ -358,6 +379,51 @@ class TranscriptionTests(unittest.TestCase):
         self.assertEqual(payload["selected"]["source_status_label"], "Live")
         self.assertEqual(payload["selected"]["source_status_tone"], "good")
         self.assertTrue(payload["selected"]["source_ingesting"])
+
+    def test_source_heartbeat_is_owned_by_transcription_api(self):
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute("UPDATE rooms SET transcription_enabled = 1 WHERE slug = 'room-a'")
+
+        response = self.client.post(
+            "/api/source/heartbeat",
+            json={
+                "host_slug": "hp-envy-16-ad0xx",
+                "token": "room-a-token",
+                "devices": ["SQ 1&2"],
+                "current_device": "SQ 1&2",
+                "is_ingesting": False,
+                "stream_profile": "wav_pcm24",
+                "stream_channels": 2,
+                "sample_rate_hz": 48000,
+                "sample_bits": 24,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["project"], "ntc-transcription")
+        self.assertTrue(payload["desired_active"])
+        self.assertTrue(payload["transcription_desired_active"])
+        self.assertFalse(payload["public_desired_active"])
+        self.assertEqual(payload["room_slug"], "room-a")
+        self.assertIn("https://ntcnas.myftp.org/transcription/api/source/ingest/hp-envy-16-ad0xx", payload["ingest_url"])
+        with sqlite3.connect(self.db_path) as connection:
+            runtime = connection.execute(
+                """
+                SELECT desired_active, current_device, stream_channels, sample_rate_hz, sample_bits
+                FROM source_runtime
+                WHERE host_slug = 'hp-envy-16-ad0xx'
+                """
+            ).fetchone()
+        self.assertEqual(runtime, (1, "SQ 1&2", 2, 48000, 24))
+
+    def test_source_heartbeat_rejects_bad_token(self):
+        response = self.client.post(
+            "/api/source/heartbeat",
+            json={"host_slug": "hp-envy-16-ad0xx", "token": "wrong"},
+        )
+
+        self.assertEqual(response.status_code, 403)
 
     def test_settings_collapses_multiple_hosts_per_room(self):
         with sqlite3.connect(self.db_path) as connection:
