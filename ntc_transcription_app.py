@@ -1073,13 +1073,14 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
             language_options=TRANSLATION_LANGUAGE_OPTIONS,
             public_base=url_for("public_transcription"),
             logout_url=url_for("transcription_settings_logout"),
-            settings_status_url=url_for("settings_status"),
+            settings_status_url="/transcription/api/internal/transcription/settings/status",
             poll_ms=app.config["NTC_TRANSCRIPTION_POLL_MS"],
             message=request.args.get("message"),
             error=request.args.get("error"),
             brand_background_url=url_for("ntc_brand_background"),
         )
 
+    @app.get("/transcription/api/internal/transcription/settings/status")
     @app.get("/api/internal/transcription/settings/status")
     def settings_status():
         if not _settings_authorized():
@@ -1208,11 +1209,14 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
     def legacy_public_transcribe_room(room_slug: str):
         return redirect(url_for("public_transcription_room", room_slug=room_slug), code=308)
 
+    @app.get("/transcription/api/public/transcription/<room_slug>/segments")
+    @app.get("/transcription/api/public/transcribe/<room_slug>/segments")
     @app.get("/api/public/transcription/<room_slug>/segments")
     @app.get("/api/public/transcribe/<room_slug>/segments")
     def public_transcription_segments(room_slug: str):
         return _segments_response(room_slug)
 
+    @app.get("/transcription/api/internal/transcription/<room_slug>/segments")
     @app.get("/api/internal/transcription/<room_slug>/segments")
     def internal_transcription_segments(room_slug: str):
         return _segments_response(room_slug)
@@ -2767,7 +2771,7 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
 
         async function poll() {
           try {
-            const response = await fetch(`/api/public/transcription/${encodeURIComponent(roomSlug)}/segments?after_id=${lastId}`, { cache: "no-store" });
+            const response = await fetch(`/transcription/api/public/transcription/${encodeURIComponent(roomSlug)}/segments?after_id=${lastId}`, { cache: "no-store" });
             if (response.ok) {
               const payload = await response.json();
               appendSegments(payload.segments || []);
