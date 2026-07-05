@@ -2573,7 +2573,12 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
     <link rel="icon" href="data:,">
     <style>
       * { box-sizing: border-box; }
-      html, body { min-height: 100%; }
+      html, body {
+        width: 100%;
+        height: 100%;
+        min-height: 100%;
+        overflow: hidden;
+      }
       body {
         margin: 0;
         background: #000;
@@ -2581,16 +2586,26 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
         font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
       main {
+        --display-padding: clamp(14px, 2.6vw, 42px);
+        position: fixed;
+        inset: 0;
         min-height: 100vh;
+        height: 100vh;
+        height: 100dvh;
         display: flex;
         align-items: flex-end;
-        width: 100vw;
-        padding: clamp(14px, 2.6vw, 42px);
+        width: 100%;
+        padding: var(--display-padding);
+        overflow: hidden;
       }
       .transcript {
         width: 100%;
+        max-height: calc(100vh - var(--display-padding) - var(--display-padding));
+        max-height: calc(100dvh - var(--display-padding) - var(--display-padding));
         display: grid;
+        align-content: end;
         gap: clamp(18px, 2.2vw, 34px);
+        overflow: hidden;
       }
       .block,
       .empty {
@@ -2602,6 +2617,10 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
         letter-spacing: 0;
         overflow-wrap: anywhere;
         text-wrap: pretty;
+      }
+      .transcript.is-tight .block,
+      .transcript.is-tight .empty {
+        font-size: clamp(30px, 4.6vw, 76px);
       }
       .block:not(:last-child) { opacity: 0.6; }
       .empty { opacity: 0.72; }
@@ -2654,6 +2673,7 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
     </main>
     <script>
       (() => {
+        if ("scrollRestoration" in history) history.scrollRestoration = "manual";
         const transcript = document.getElementById("transcript");
         if (!transcript) return;
         const roomSlug = transcript.dataset.roomSlug;
@@ -2736,6 +2756,33 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
           });
         }
 
+        function keepPageFixed() {
+          if (window.scrollX || window.scrollY) window.scrollTo(0, 0);
+          document.documentElement.scrollTop = 0;
+          document.body.scrollTop = 0;
+        }
+
+        function availableTranscriptHeight() {
+          const main = transcript.closest("main");
+          const style = main ? window.getComputedStyle(main) : null;
+          const paddingTop = style ? Number.parseFloat(style.paddingTop) || 0 : 0;
+          const paddingBottom = style ? Number.parseFloat(style.paddingBottom) || 0 : 0;
+          return Math.max(0, window.innerHeight - paddingTop - paddingBottom);
+        }
+
+        function transcriptFits() {
+          return transcript.scrollHeight <= availableTranscriptHeight() + 1;
+        }
+
+        function fitTranscript() {
+          transcript.classList.remove("is-tight");
+          while (!transcriptFits() && transcript.children.length > 1) {
+            transcript.firstElementChild.remove();
+          }
+          if (!transcriptFits()) transcript.classList.add("is-tight");
+          keepPageFixed();
+        }
+
         function render(animatedIds = new Set()) {
           const blocks = buildBlocks();
           transcript.replaceChildren();
@@ -2745,6 +2792,7 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
             empty.id = "empty-state";
             empty.textContent = "Waiting for transcription.";
             transcript.appendChild(empty);
+            fitTranscript();
             return;
           }
           for (const blockSegments of blocks) {
@@ -2754,7 +2802,7 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
             renderBlockText(block, blockSegments, animatedIds);
             transcript.appendChild(block);
           }
-          window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+          fitTranscript();
         }
 
         for (const segment of initialSegments) addSegment(segment);
