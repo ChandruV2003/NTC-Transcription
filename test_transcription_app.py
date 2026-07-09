@@ -755,6 +755,10 @@ class TranscriptionTests(unittest.TestCase):
         self.assertIn(b"/transcription/api/source/browser/start/", response.data)
         self.assertIn(b"getUserMedia", response.data)
         self.assertIn(b"autoGainControl", response.data)
+        self.assertIn(b"Start Capture", response.data)
+        self.assertIn(b"debug-line", response.data)
+        self.assertIn(b"isSecureContext", response.data)
+        self.assertIn(b"Open this page in Safari", response.data)
 
     def test_browser_capture_start_rejects_bad_token(self):
         response = self.client.post(

@@ -231,6 +231,25 @@ BROWSER_CAPTURE_TEMPLATE = """
       font-size: 16px;
       line-height: 1.35;
     }
+    .debug {
+      display: grid;
+      gap: 6px;
+      margin-top: 14px;
+      border: 1px solid rgba(119, 180, 224, 0.22);
+      border-radius: 16px;
+      padding: 12px 14px;
+      background: rgba(4, 10, 18, 0.44);
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+    .debug strong {
+      color: var(--text);
+      font-size: 12px;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
     @media (max-width: 560px) {
       main { width: min(100vw - 22px, 680px); }
       .status-row, .actions { grid-template-columns: 1fr; }
@@ -266,10 +285,14 @@ BROWSER_CAPTURE_TEMPLATE = """
         </div>
       </div>
       <div class="actions">
-        <button class="primary" id="start-button" type="button">Start</button>
-        <button class="danger" id="stop-button" type="button" disabled>Stop</button>
+        <button class="primary" id="start-button" type="button" onclick="startCapture()">Start Capture</button>
+        <button class="danger" id="stop-button" type="button" onclick="stopCapture(true)" disabled>Stop Capture</button>
       </div>
       <div class="message" id="message"></div>
+      <div class="debug" id="debug-box" aria-live="polite">
+        <strong>Debug</strong>
+        <span id="debug-line">Loading capture controls...</span>
+      </div>
     </section>
   </main>
   <script>
@@ -285,6 +308,7 @@ BROWSER_CAPTURE_TEMPLATE = """
     const sampleRateValue = document.getElementById("sample-rate");
     const queuedValue = document.getElementById("queued");
     const message = document.getElementById("message");
+    const debugLine = document.getElementById("debug-line");
 
     let mediaStream = null;
     let audioContext = null;
@@ -297,6 +321,12 @@ BROWSER_CAPTURE_TEMPLATE = """
     let sending = false;
     let sampleBuffer = [];
     let bufferedSamples = 0;
+    let startInProgress = false;
+
+    function debug(text) {
+      if (debugLine) debugLine.textContent = text || "";
+      console.log(`[ntc-capture] ${text || ""}`);
+    }
 
     function setState(label, tone = "") {
       statePill.textContent = label;
@@ -305,6 +335,26 @@ BROWSER_CAPTURE_TEMPLATE = """
 
     function setMessage(text) {
       message.textContent = text || "";
+    }
+
+    function ensureCaptureSupported() {
+      if (!window.isSecureContext) {
+        throw new Error("Microphone capture needs HTTPS. Open the ntcnas.myftp.org link directly in Safari.");
+      }
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error("This browser is not exposing microphone access. Open this page in Safari, not an in-app browser.");
+      }
+      if (!window.AudioContext && !window.webkitAudioContext) {
+        throw new Error("This browser is not exposing Web Audio capture.");
+      }
+    }
+
+    function withTimeout(promise, milliseconds, messageText) {
+      let timeoutId = null;
+      const timeout = new Promise((_, reject) => {
+        timeoutId = window.setTimeout(() => reject(new Error(messageText)), milliseconds);
+      });
+      return Promise.race([promise, timeout]).finally(() => window.clearTimeout(timeoutId));
     }
 
     async function postJson(url, payload) {
@@ -407,32 +457,41 @@ BROWSER_CAPTURE_TEMPLATE = """
     }
 
     async function startCapture() {
+      if (captureActive || startInProgress) return;
+      startInProgress = true;
+      debug(`Start tapped. secure=${window.isSecureContext ? "yes" : "no"} media=${navigator.mediaDevices && navigator.mediaDevices.getUserMedia ? "yes" : "no"}`);
       if (!token) {
         setState("Token Needed", "warn");
         setMessage("Open the paired capture link from transcription settings.");
+        debug("Missing source token in URL.");
+        startInProgress = false;
         return;
       }
       setState("Starting", "warn");
-      setMessage("");
+      setMessage("Requesting microphone permission...");
       startButton.disabled = true;
       try {
-        mediaStream = await navigator.mediaDevices.getUserMedia({
+        ensureCaptureSupported();
+        mediaStream = await withTimeout(navigator.mediaDevices.getUserMedia({
           audio: {
             channelCount: 1,
             echoCancellation: false,
             noiseSuppression: false,
             autoGainControl: true
           }
-        });
+        }), 12000, "Microphone permission did not complete. Check Safari mic permission and keep the page in the foreground.");
+        debug("Microphone stream opened.");
         audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        await audioContext.resume();
+        await withTimeout(audioContext.resume(), 5000, "Audio engine did not start. Try tapping Start Capture again.");
         sampleRate = Math.round(audioContext.sampleRate || 48000);
         sampleRateValue.textContent = `${sampleRate} Hz`;
-        await postJson(startUrl, {
+        debug(`Audio context ready at ${sampleRate} Hz. Starting server source...`);
+        await withTimeout(postJson(startUrl, {
           sample_rate_hz: sampleRate,
           current_device: "iPhone microphone",
           user_agent: navigator.userAgent
-        });
+        }), 10000, "Timed out reaching NTC Transcription from the phone.");
+        debug("Server accepted iPhone as Room C source.");
         captureActive = true;
         sourceNode = audioContext.createMediaStreamSource(mediaStream);
         processor = audioContext.createScriptProcessor(4096, 1, 1);
@@ -443,13 +502,17 @@ BROWSER_CAPTURE_TEMPLATE = """
         processor.connect(audioContext.destination);
         await requestWakeLock();
         setState("Live", "good");
+        setMessage("iPhone microphone is feeding Room C. Keep this page open and unlocked.");
+        debug("Live. Audio chunks should begin uploading as the level moves.");
         stopButton.disabled = false;
       } catch (error) {
         setState("Error", "bad");
         setMessage(error.message || "Microphone start failed.");
+        debug(`Start failed: ${error.message || error}`);
         await stopCapture(false);
       } finally {
         startButton.disabled = captureActive;
+        startInProgress = false;
       }
     }
 
@@ -480,10 +543,14 @@ BROWSER_CAPTURE_TEMPLATE = """
         await postJson(stopUrl, {sample_rate_hz: sampleRate}).catch(() => {});
       }
       setState("Idle");
+      debug(wasActive ? "Capture stopped." : "Capture reset.");
     }
 
+    window.startCapture = startCapture;
+    window.stopCapture = stopCapture;
     startButton.addEventListener("click", startCapture);
     stopButton.addEventListener("click", () => stopCapture(true));
+    debug(`Ready. secure=${window.isSecureContext ? "yes" : "no"} media=${navigator.mediaDevices && navigator.mediaDevices.getUserMedia ? "yes" : "no"} audio=${window.AudioContext || window.webkitAudioContext ? "yes" : "no"}`);
     window.addEventListener("pagehide", () => {
       if (captureActive) navigator.sendBeacon(stopUrl, new Blob(["{}"], {type: "application/json"}));
     });
