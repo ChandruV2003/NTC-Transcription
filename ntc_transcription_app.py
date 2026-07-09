@@ -32,8 +32,8 @@ ROOM_DISPLAY_LABELS = {
     "convention-laptop": "Room C",
 }
 ROOM_SOURCE_HOST_PREFERENCE = {
-    "room-a": ("hp-envy-16-ad0xx",),
-    "room-b": ("hp-pavilion-14m-ba1xx",),
+    "room-a": ("ntc-dante-room-a", "hp-envy-16-ad0xx"),
+    "room-b": ("ntc-dante-room-b", "hp-pavilion-14m-ba1xx"),
     "convention-laptop": ("convention-laptop",),
 }
 TRANSLATION_LANGUAGE_OPTIONS = [
@@ -422,6 +422,7 @@ class TranscriptionStore:
                        hosts.label AS host_label,
                        hosts.enabled AS host_enabled,
                        hosts.manual_mode,
+                       hosts.notes,
                        hosts.translation_output_enabled,
                        hosts.translation_target_language,
                        source_runtime.desired_active,
@@ -449,10 +450,13 @@ class TranscriptionStore:
             preferred_hosts = ROOM_SOURCE_HOST_PREFERENCE.get(row["slug"], ())
             has_error = bool(row["last_error"])
             return (
-                1 if row["host_slug"] in preferred_hosts else 0,
-                1 if row["host_enabled"] else 0,
+                1 if row["is_ingesting"] and row["desired_active"] else 0,
                 1 if row["is_ingesting"] else 0,
                 1 if row["desired_active"] else 0,
+                1 if row["host_slug"] in preferred_hosts else 0,
+                -preferred_hosts.index(row["host_slug"]) if row["host_slug"] in preferred_hosts else -999,
+                1 if "[source-only]" in (row["notes"] or "").casefold() else 0,
+                1 if row["host_enabled"] else 0,
                 1 if row["current_device"] else 0,
                 0 if has_error else 1,
                 row["last_seen_at"] or "",
@@ -493,6 +497,7 @@ class TranscriptionStore:
                     "host_label": row["host_label"] or "No source host",
                     "host_enabled": bool(row["host_enabled"]) if row["host_slug"] else False,
                     "manual_mode": row["manual_mode"] or "",
+                    "source_only": "[source-only]" in (row["notes"] or "").casefold(),
                     "source_requested": source_requested,
                     "source_ingesting": source_ingesting,
                     "source_status_label": source_status_label,
@@ -519,7 +524,7 @@ class TranscriptionStore:
     def _room_schedule_host(self, connection: sqlite3.Connection, room_slug: str):
         rows = connection.execute(
             """
-            SELECT slug, label, enabled, timezone
+            SELECT slug, label, enabled, timezone, notes
             FROM hosts
             WHERE room_slug = ?
             """,
@@ -532,6 +537,8 @@ class TranscriptionStore:
             rows,
             key=lambda row: (
                 1 if row["slug"] in preferred_hosts else 0,
+                -preferred_hosts.index(row["slug"]) if row["slug"] in preferred_hosts else -999,
+                1 if "[source-only]" in (row["notes"] or "").casefold() else 0,
                 1 if row["enabled"] else 0,
                 row["label"] or "",
             ),

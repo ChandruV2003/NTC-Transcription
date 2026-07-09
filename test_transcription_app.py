@@ -35,6 +35,7 @@ def _create_test_db(path: Path):
                 device_order_json TEXT NOT NULL DEFAULT '[]',
                 heartbeat_token TEXT NOT NULL DEFAULT '',
                 timezone TEXT NOT NULL DEFAULT 'America/New_York',
+                notes TEXT NOT NULL DEFAULT '',
                 translation_output_enabled INTEGER NOT NULL DEFAULT 0,
                 translation_target_language TEXT NOT NULL DEFAULT 'zh-CN',
                 updated_at TEXT NOT NULL DEFAULT ''
@@ -130,15 +131,17 @@ def _create_test_db(path: Path):
         connection.executemany(
             """
             INSERT INTO hosts (
-                slug, label, room_slug, enabled, manual_mode, translation_output_enabled,
+                slug, label, room_slug, enabled, manual_mode, notes, translation_output_enabled,
                 translation_target_language, heartbeat_token, updated_at
             )
-            VALUES (?, ?, ?, 1, 'auto', ?, 'zh-CN', ?, '')
+            VALUES (?, ?, ?, 1, 'auto', ?, ?, 'zh-CN', ?, '')
             """,
             [
-                ("hp-envy-16-ad0xx", "HP Envy", "room-a", 0, "room-a-token"),
-                ("hp-pavilion-14m-ba1xx", "HP Pavilion", "room-b", 0, "room-b-token"),
-                ("convention-laptop", "Convention Laptop", "convention-laptop", 0, "convention-token"),
+                ("ntc-dante-room-a", "NTC-Dante Room A", "room-a", "[source-only] Primary Dante bridge feed.", 0, "dante-a-token"),
+                ("hp-envy-16-ad0xx", "HP Envy", "room-a", "", 0, "room-a-token"),
+                ("ntc-dante-room-b", "NTC-Dante Room B", "room-b", "[source-only] Primary Dante bridge feed.", 0, "dante-b-token"),
+                ("hp-pavilion-14m-ba1xx", "HP Pavilion", "room-b", "", 0, "room-b-token"),
+                ("convention-laptop", "Convention Laptop", "convention-laptop", "[source-only] Temporary convention source.", 0, "convention-token"),
             ],
         )
         connection.executemany(
@@ -149,7 +152,9 @@ def _create_test_db(path: Path):
             VALUES (?, ?, ?, ?, ?, '')
             """,
             [
+                ("ntc-dante-room-a", 0, 0, "", "2026-05-31T12:00:00+00:00"),
                 ("hp-envy-16-ad0xx", 0, 0, "SQ 1&2", "2026-05-31T12:00:00+00:00"),
+                ("ntc-dante-room-b", 0, 0, "", "2026-05-31T12:00:00+00:00"),
                 ("hp-pavilion-14m-ba1xx", 0, 0, "SQ 3&4", "2026-05-31T12:00:00+00:00"),
                 ("convention-laptop", 0, 0, "", "2026-05-31T12:00:00+00:00"),
             ],
@@ -300,6 +305,12 @@ class TranscriptionTests(unittest.TestCase):
             connection.execute(
                 """
                 INSERT INTO schedules (host_slug, day, start_time, end_time, enabled)
+                VALUES ('ntc-dante-room-a', 'WED', '18:50', '21:00', 0)
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO schedules (host_slug, day, start_time, end_time, enabled)
                 VALUES ('hp-envy-16-ad0xx', 'WED', '19:00', '21:00', 1)
                 """
             )
@@ -311,16 +322,21 @@ class TranscriptionTests(unittest.TestCase):
         self.assertIn(b"WebCall schedule", response.data)
         self.assertIn(b"Imported from WebCall. On/off is read-only here.", response.data)
         self.assertIn(b"Wednesday", response.data)
-        self.assertIn(b"19:00", response.data)
+        self.assertIn(b"18:50", response.data)
         self.assertIn(b"disabled", response.data)
         self.assertIn(b"Transcription-only starts", response.data)
+        schedule = self.app.transcription_store.list_room_schedule("room-a")
+        self.assertEqual(
+            [(row["source"], row["day"], row["start_time"], row["enabled"]) for row in schedule["webcall_rows"]],
+            [("webcall", "WED", "18:50", False)],
+        )
 
     def test_room_a_extra_schedule_does_not_change_webcall_schedule(self):
         with sqlite3.connect(self.db_path) as connection:
             connection.execute(
                 """
                 INSERT INTO schedules (host_slug, day, start_time, end_time, enabled)
-                VALUES ('hp-envy-16-ad0xx', 'WED', '19:00', '21:00', 1)
+                VALUES ('ntc-dante-room-a', 'WED', '18:50', '21:00', 0)
                 """
             )
         self._login_settings()
@@ -344,7 +360,7 @@ class TranscriptionTests(unittest.TestCase):
                 """
                 SELECT host_slug, day, start_time, end_time, enabled
                 FROM schedules
-                WHERE host_slug = 'hp-envy-16-ad0xx'
+                WHERE host_slug = 'ntc-dante-room-a'
                 """
             ).fetchall()
             transcription_rows = connection.execute(
@@ -354,8 +370,8 @@ class TranscriptionTests(unittest.TestCase):
                 WHERE room_slug = 'room-a'
                 """
             ).fetchall()
-        self.assertEqual(webcall_rows, [("hp-envy-16-ad0xx", "WED", "19:00", "21:00", 1)])
-        self.assertEqual(transcription_rows, [("room-a", "hp-envy-16-ad0xx", "FRI", "10:00", "13:00", 1)])
+        self.assertEqual(webcall_rows, [("ntc-dante-room-a", "WED", "18:50", "21:00", 0)])
+        self.assertEqual(transcription_rows, [("room-a", "ntc-dante-room-a", "FRI", "10:00", "13:00", 1)])
 
     def test_room_a_transcription_only_schedule_autostarts_without_webcall(self):
         with sqlite3.connect(self.db_path) as connection:
@@ -363,7 +379,7 @@ class TranscriptionTests(unittest.TestCase):
             connection.execute(
                 """
                 INSERT INTO transcription_schedules (room_slug, host_slug, day, start_time, end_time, enabled)
-                VALUES ('room-a', 'hp-envy-16-ad0xx', 'FRI', '10:00', '13:00', 1)
+                VALUES ('room-a', 'ntc-dante-room-a', 'FRI', '10:00', '13:00', 1)
                 """
             )
 
@@ -388,26 +404,13 @@ class TranscriptionTests(unittest.TestCase):
         with sqlite3.connect(self.db_path) as connection:
             connection.execute(
                 """
-                INSERT INTO hosts (
-                    slug, label, room_slug, enabled, manual_mode, translation_output_enabled,
-                    translation_target_language, heartbeat_token, updated_at
-                )
-                VALUES ('ntc-dante-room-b', 'NTC-Dante Room B', 'room-b', 1, 'auto', 0, 'zh-CN', 'dante-token', '')
-                """
-            )
-            connection.execute(
-                """
-                INSERT INTO source_runtime (
-                    host_slug, desired_active, is_ingesting, current_device, last_seen_at, last_error
-                )
-                VALUES (
-                    'ntc-dante-room-b',
-                    0,
-                    0,
-                    '',
-                    '2999-01-01T00:00:00+00:00',
-                    'transcription heartbeat failed'
-                )
+                UPDATE source_runtime
+                SET desired_active = 0,
+                    is_ingesting = 0,
+                    current_device = 'CQ 1&2',
+                    last_seen_at = '2999-01-01T00:00:00+00:00',
+                    last_error = 'fallback should not become primary'
+                WHERE host_slug = 'hp-pavilion-14m-ba1xx'
                 """
             )
         self._login_settings()
@@ -417,8 +420,8 @@ class TranscriptionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertEqual([room["label"] for room in payload["rooms"]], ["Room A", "Room B", "Room C"])
-        self.assertEqual(payload["selected"]["host_slug"], "hp-pavilion-14m-ba1xx")
-        self.assertEqual(payload["selected"]["host_label"], "HP Pavilion")
+        self.assertEqual(payload["selected"]["host_slug"], "ntc-dante-room-b")
+        self.assertEqual(payload["selected"]["host_label"], "NTC-Dante Room B")
         self.assertEqual(payload["selected"]["last_error"], "")
 
     def test_room_c_schedule_can_be_updated_from_settings(self):
@@ -746,19 +749,13 @@ class TranscriptionTests(unittest.TestCase):
             connection.execute("UPDATE rooms SET transcription_enabled = 1 WHERE slug = 'room-a'")
             connection.execute(
                 """
-                INSERT INTO hosts (
-                    slug, label, room_slug, enabled, manual_mode, translation_output_enabled,
-                    translation_target_language, updated_at
-                )
-                VALUES ('ntc-dante-room-a', 'NTC-Dante Room A', 'room-a', 1, 'auto', 0, 'zh-CN', '')
-                """
-            )
-            connection.execute(
-                """
-                INSERT INTO source_runtime (
-                    host_slug, desired_active, is_ingesting, current_device, last_seen_at, last_error
-                )
-                VALUES ('ntc-dante-room-a', 1, 1, 'Dante Room A 1-2', '2026-06-24T21:00:00+00:00', '')
+                UPDATE source_runtime
+                SET desired_active = 1,
+                    is_ingesting = 1,
+                    current_device = 'Dante Room A 1-2',
+                    last_seen_at = '2026-06-24T21:00:00+00:00',
+                    last_error = ''
+                WHERE host_slug = 'ntc-dante-room-a'
                 """
             )
         self._login_settings()
@@ -774,14 +771,14 @@ class TranscriptionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data.count(b'data-room-tab="room-a"'), 1)
         self.assertEqual(response.data.count(b'data-room-tab="room-b"'), 1)
-        self.assertIn(b"HP Envy", response.data)
-        self.assertNotIn(b"NTC-Dante Room A", response.data)
+        self.assertIn(b"NTC-Dante Room A", response.data)
         self.assertIn(b"data-translation-switch", response.data)
         self.assertEqual(status.status_code, 200)
         payload = status.get_json()
         self.assertEqual([room["slug"] for room in payload["rooms"]].count("room-a"), 1)
-        self.assertEqual(payload["selected"]["host_slug"], "hp-envy-16-ad0xx")
+        self.assertEqual(payload["selected"]["host_slug"], "ntc-dante-room-a")
         self.assertEqual(payload["selected"]["translation_host_slug"], "hp-envy-16-ad0xx")
+        self.assertEqual(payload["selected"]["translation_host_label"], "HP Envy")
         self.assertTrue(payload["selected"]["translation_output_supported"])
         self.assertEqual(toggle.status_code, 200)
         with sqlite3.connect(self.db_path) as connection:
