@@ -291,6 +291,88 @@ class TranscriptionTests(unittest.TestCase):
         self.assertIn(b'data-source-detail="device"', response.data)
         self.assertIn(b"data-status-url", response.data)
         self.assertIn(b"/api/internal/transcription/settings/status", response.data)
+        self.assertIn(b"Schedule", response.data)
+        self.assertIn(b"follows the WebCall meeting schedule", response.data)
+
+    def test_settings_uses_room_abc_tabs_and_preferred_room_source(self):
+        self.app.config["NTC_TRANSCRIPTION_VISIBLE_ROOMS"] = "room-a,room-b,convention-laptop"
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO hosts (
+                    slug, label, room_slug, enabled, manual_mode, translation_output_enabled,
+                    translation_target_language, heartbeat_token, updated_at
+                )
+                VALUES ('ntc-dante-room-b', 'NTC-Dante Room B', 'room-b', 1, 'auto', 0, 'zh-CN', 'dante-token', '')
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO source_runtime (
+                    host_slug, desired_active, is_ingesting, current_device, last_seen_at, last_error
+                )
+                VALUES (
+                    'ntc-dante-room-b',
+                    0,
+                    0,
+                    '',
+                    '2999-01-01T00:00:00+00:00',
+                    'transcription heartbeat failed'
+                )
+                """
+            )
+        self._login_settings()
+
+        response = self.client.get("/transcription/api/internal/transcription/settings/status?room=room-b")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual([room["label"] for room in payload["rooms"]], ["Room A", "Room B", "Room C"])
+        self.assertEqual(payload["selected"]["host_slug"], "hp-pavilion-14m-ba1xx")
+        self.assertEqual(payload["selected"]["host_label"], "HP Pavilion")
+        self.assertEqual(payload["selected"]["last_error"], "")
+
+    def test_room_c_schedule_can_be_updated_from_settings(self):
+        self.app.config["NTC_TRANSCRIPTION_VISIBLE_ROOMS"] = "room-a,room-b,convention-laptop"
+        self.app.config["NTC_TRANSCRIPTION_SCHEDULER_HOSTS"] = "convention-laptop"
+        self._login_settings()
+
+        response = self.client.post(
+            "/transcription/settings/rooms/convention-laptop/schedule",
+            data={
+                "schedule_count": "2",
+                "schedule_day_0": "THU",
+                "schedule_start_0": "10:00",
+                "schedule_end_0": "13:00",
+                "schedule_enabled_0": "1",
+                "schedule_day_1": "THU",
+                "schedule_start_1": "19:00",
+                "schedule_end_1": "22:00",
+                "schedule_enabled_1": "1",
+            },
+            follow_redirects=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Room C schedule updated.", response.data)
+        self.assertIn(b"Room C Timing", response.data)
+        self.assertIn(b"Soft End", response.data)
+        with sqlite3.connect(self.db_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT host_slug, day, start_time, end_time, enabled
+                FROM schedules
+                WHERE host_slug = 'convention-laptop'
+                ORDER BY start_time
+                """
+            ).fetchall()
+        self.assertEqual(
+            rows,
+            [
+                ("convention-laptop", "THU", "10:00", "13:00", 1),
+                ("convention-laptop", "THU", "19:00", "22:00", 1),
+            ],
+        )
 
     def test_settings_can_toggle_room_transcription(self):
         self._login_settings()
@@ -603,12 +685,13 @@ class TranscriptionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data.count(b'data-room-tab="room-a"'), 1)
         self.assertEqual(response.data.count(b'data-room-tab="room-b"'), 1)
-        self.assertIn(b"NTC-Dante Room A", response.data)
+        self.assertIn(b"HP Envy", response.data)
+        self.assertNotIn(b"NTC-Dante Room A", response.data)
         self.assertIn(b"data-translation-switch", response.data)
         self.assertEqual(status.status_code, 200)
         payload = status.get_json()
         self.assertEqual([room["slug"] for room in payload["rooms"]].count("room-a"), 1)
-        self.assertEqual(payload["selected"]["host_slug"], "ntc-dante-room-a")
+        self.assertEqual(payload["selected"]["host_slug"], "hp-envy-16-ad0xx")
         self.assertEqual(payload["selected"]["translation_host_slug"], "hp-envy-16-ad0xx")
         self.assertTrue(payload["selected"]["translation_output_supported"])
         self.assertEqual(toggle.status_code, 200)

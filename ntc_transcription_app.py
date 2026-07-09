@@ -23,8 +23,19 @@ ROOM_SLUG_ALIASES = {
     "study-room": "room-a",
     "meeting-hall": "room-b",
     "convention": "convention-laptop",
+    "room-c": "convention-laptop",
 }
 DEFAULT_VISIBLE_ROOM_SLUGS = ("room-a", "room-b", "convention-laptop")
+ROOM_DISPLAY_LABELS = {
+    "room-a": "Room A",
+    "room-b": "Room B",
+    "convention-laptop": "Room C",
+}
+ROOM_SOURCE_HOST_PREFERENCE = {
+    "room-a": ("hp-envy-16-ad0xx",),
+    "room-b": ("hp-pavilion-14m-ba1xx",),
+    "convention-laptop": ("convention-laptop",),
+}
 TRANSLATION_LANGUAGE_OPTIONS = [
     {"code": "zh-CN", "label": "Mandarin Chinese"},
     {"code": "es", "label": "Spanish"},
@@ -36,11 +47,24 @@ TRANSLATION_OUTPUT_HOST_SLUGS = {"hp-envy-16-ad0xx"}
 BRAND_BACKGROUND_FILENAME = "ntc-embossed-background.jpg"
 DEFAULT_BRAND_BACKGROUND_PATH = Path(__file__).resolve().parent / "assets" / BRAND_BACKGROUND_FILENAME
 WEEKDAY_KEYS = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
+WEEKDAY_LABELS = {
+    "MON": "Monday",
+    "TUE": "Tuesday",
+    "WED": "Wednesday",
+    "THU": "Thursday",
+    "FRI": "Friday",
+    "SAT": "Saturday",
+    "SUN": "Sunday",
+}
 
 
 def _canonical_room_slug(room_slug: str | None) -> str:
     normalized = (room_slug or "").strip()
     return ROOM_SLUG_ALIASES.get(normalized, normalized)
+
+
+def _room_display_label(room_slug: str, fallback: str | None = None) -> str:
+    return ROOM_DISPLAY_LABELS.get(room_slug, fallback or room_slug)
 
 
 def _csv_tuple(value: str, default: tuple[str, ...]) -> tuple[str, ...]:
@@ -119,7 +143,7 @@ class TranscriptionStore:
             ).fetchone()
         if not row:
             return None
-        return {"slug": row["slug"], "label": row["label"] or row["slug"]}
+        return {"slug": row["slug"], "label": _room_display_label(row["slug"], row["label"])}
 
     def get_host(self, host_slug: str, *, include_secret: bool = False):
         with self._connect(readonly=True) as connection:
@@ -400,20 +424,24 @@ class TranscriptionStore:
                 visible_room_slugs,
             ).fetchall()
         rows_by_room = {}
-        room_order = []
         for row in rows:
             if row["slug"] not in rows_by_room:
                 rows_by_room[row["slug"]] = []
-                room_order.append(row["slug"])
             rows_by_room[row["slug"]].append(row)
+        room_order = [slug for slug in visible_room_slugs if slug in rows_by_room]
+        room_order.extend(slug for slug in rows_by_room if slug not in room_order)
 
         def source_sort_key(row):
+            preferred_hosts = ROOM_SOURCE_HOST_PREFERENCE.get(row["slug"], ())
+            has_error = bool(row["last_error"])
             return (
+                1 if row["host_slug"] in preferred_hosts else 0,
+                1 if row["host_enabled"] else 0,
                 1 if row["is_ingesting"] else 0,
                 1 if row["desired_active"] else 0,
                 1 if row["current_device"] else 0,
+                0 if has_error else 1,
                 row["last_seen_at"] or "",
-                1 if row["host_enabled"] else 0,
                 1 if row["host_slug"] else 0,
                 row["host_label"] or "",
             )
@@ -444,7 +472,7 @@ class TranscriptionStore:
             rooms.append(
                 {
                     "slug": row["slug"],
-                    "label": row["label"] or row["slug"],
+                    "label": _room_display_label(row["slug"], row["label"]),
                     "room_enabled": bool(row["room_enabled"]),
                     "transcription_enabled": transcription_enabled,
                     "host_slug": row["host_slug"] or "",
@@ -473,6 +501,133 @@ class TranscriptionStore:
                 }
             )
         return rooms
+
+    def _room_schedule_host(self, connection: sqlite3.Connection, room_slug: str):
+        rows = connection.execute(
+            """
+            SELECT slug, label, enabled, timezone
+            FROM hosts
+            WHERE room_slug = ?
+            """,
+            (room_slug,),
+        ).fetchall()
+        if not rows:
+            return None
+        preferred_hosts = ROOM_SOURCE_HOST_PREFERENCE.get(room_slug, ())
+        return max(
+            rows,
+            key=lambda row: (
+                1 if row["slug"] in preferred_hosts else 0,
+                1 if row["enabled"] else 0,
+                row["label"] or "",
+            ),
+        )
+
+    def list_room_schedule(self, room_slug: str, *, scheduler_hosts: tuple[str, ...]):
+        room_slug = _canonical_room_slug(room_slug)
+        scheduler_hosts = tuple(slug for slug in scheduler_hosts if slug)
+        with self._connect(readonly=True) as connection:
+            room = connection.execute(
+                "SELECT slug, label FROM rooms WHERE slug = ?",
+                (room_slug,),
+            ).fetchone()
+            if not room:
+                return None
+            host = self._room_schedule_host(connection, room_slug)
+            host_slug = host["slug"] if host else ""
+            editable = bool(host_slug and host_slug in scheduler_hosts)
+            rows = []
+            if editable:
+                rows = [
+                    {
+                        "id": int(row["id"]),
+                        "day": row["day"],
+                        "day_label": WEEKDAY_LABELS.get(row["day"], row["day"]),
+                        "start_time": row["start_time"],
+                        "end_time": row["end_time"],
+                        "enabled": bool(row["enabled"]),
+                    }
+                    for row in connection.execute(
+                        """
+                        SELECT id, day, start_time, end_time, enabled
+                        FROM schedules
+                        WHERE host_slug = ?
+                        ORDER BY CASE day
+                            WHEN 'MON' THEN 1
+                            WHEN 'TUE' THEN 2
+                            WHEN 'WED' THEN 3
+                            WHEN 'THU' THEN 4
+                            WHEN 'FRI' THEN 5
+                            WHEN 'SAT' THEN 6
+                            WHEN 'SUN' THEN 7
+                            ELSE 8
+                        END, start_time
+                        """,
+                        (host_slug,),
+                    ).fetchall()
+                ]
+        if editable:
+            note = "Room C starts from this schedule. End times are soft reference only; transcription will not auto-stop if the meeting runs long."
+        else:
+            note = f"{_room_display_label(room_slug, room['label'])} follows the WebCall meeting schedule. Configure Room A/B meeting times in WebCall, not here."
+        return {
+            "room_slug": room_slug,
+            "room_label": _room_display_label(room_slug, room["label"]),
+            "host_slug": host_slug,
+            "host_label": (host["label"] if host else "") or "No schedule source",
+            "timezone": (host["timezone"] if host else "") or "America/New_York",
+            "editable": editable,
+            "rows": rows,
+            "note": note,
+        }
+
+    def replace_room_schedule(
+        self,
+        room_slug: str,
+        rows: list[dict],
+        *,
+        scheduler_hosts: tuple[str, ...],
+    ) -> bool:
+        room_slug = _canonical_room_slug(room_slug)
+        scheduler_hosts = tuple(slug for slug in scheduler_hosts if slug)
+        timestamp = datetime.now(timezone.utc).isoformat()
+        with self._connect(readonly=False) as connection:
+            room = connection.execute(
+                "SELECT slug FROM rooms WHERE slug = ?",
+                (room_slug,),
+            ).fetchone()
+            if not room:
+                return False
+            host = self._room_schedule_host(connection, room_slug)
+            if not host or host["slug"] not in scheduler_hosts:
+                return False
+            host_slug = host["slug"]
+            connection.execute("DELETE FROM schedules WHERE host_slug = ?", (host_slug,))
+            connection.executemany(
+                """
+                INSERT INTO schedules (host_slug, day, start_time, end_time, enabled)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        host_slug,
+                        row["day"],
+                        row["start_time"],
+                        row["end_time"],
+                        1 if row.get("enabled") else 0,
+                    )
+                    for row in rows
+                ],
+            )
+            self._record_event(
+                connection,
+                component="transcription",
+                event_type="transcription-schedule-updated",
+                message=f"Transcription schedule updated for {room_slug}.",
+                room_slug=room_slug,
+                details={"surface": "/transcription/settings", "host_slug": host_slug, "updated_at": timestamp},
+            )
+            return True
 
     def set_room_transcription_enabled(
         self,
@@ -1361,11 +1516,17 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
         if auth_response:
             return auth_response
         rooms, selected = _settings_context(request.args.get("room"))
+        selected_schedule = (
+            transcription_store.list_room_schedule(selected["slug"], scheduler_hosts=_scheduler_hosts())
+            if selected
+            else None
+        )
         return render_template_string(
             SETTINGS_TEMPLATE,
             title=f"{app.config['NTC_TRANSCRIPTION_TITLE']} Settings",
             rooms=rooms,
             selected=selected,
+            selected_schedule=selected_schedule,
             transcript_archives=transcription_store.list_transcript_archives(_visible_rooms(), limit=8),
             language_options=TRANSLATION_LANGUAGE_OPTIONS,
             public_base=url_for("public_transcription"),
@@ -1391,6 +1552,53 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
         )
+
+    @app.post("/transcription/settings/rooms/<room_slug>/schedule")
+    def set_room_schedule(room_slug: str):
+        auth_response = _require_settings_auth()
+        if auth_response:
+            return auth_response
+        room = _room_or_404(room_slug)
+        if not room:
+            return jsonify({"error": "unknown room"}), 404
+        schedule = transcription_store.list_room_schedule(room["slug"], scheduler_hosts=_scheduler_hosts())
+        if not schedule or not schedule["editable"]:
+            return redirect(
+                url_for(
+                    "transcription_settings",
+                    room=room["slug"],
+                    error=f"{room['label']} schedule is controlled by WebCall.",
+                )
+            )
+        try:
+            schedule_count = int(request.form.get("schedule_count", "0") or "0")
+        except ValueError:
+            schedule_count = 0
+        rows: list[dict] = []
+        for index in range(max(0, min(40, schedule_count))):
+            day = (request.form.get(f"schedule_day_{index}") or "").strip().upper()
+            start_time = (request.form.get(f"schedule_start_{index}") or "").strip()
+            end_time = (request.form.get(f"schedule_end_{index}") or "").strip()
+            if day not in WEEKDAY_KEYS:
+                return redirect(
+                    url_for("transcription_settings", room=room["slug"], error="Schedule contains an invalid day.")
+                )
+            if _parse_hhmm(start_time) is None or _parse_hhmm(end_time) is None:
+                return redirect(
+                    url_for("transcription_settings", room=room["slug"], error="Schedule times must use HH:MM.")
+                )
+            rows.append(
+                {
+                    "day": day,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "enabled": request.form.get(f"schedule_enabled_{index}") == "1",
+                }
+            )
+        if not rows:
+            return redirect(url_for("transcription_settings", room=room["slug"], error="At least one schedule row is required."))
+        transcription_store.replace_room_schedule(room["slug"], rows, scheduler_hosts=_scheduler_hosts())
+        return redirect(url_for("transcription_settings", room=room["slug"], message=f"{room['label']} schedule updated."))
 
     @app.post("/transcription/settings/rooms/<room_slug>/transcription")
     def set_room_transcription(room_slug: str):
@@ -1853,9 +2061,9 @@ SETTINGS_TEMPLATE = """
       }
       .tabs {
         display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
+        grid-template-columns: repeat(3, minmax(0, 1fr));
         gap: 0.28rem;
-        width: min(620px, 100%);
+        width: min(820px, 100%);
         margin: 1rem auto 1.4rem;
         padding: 0.28rem;
         border: 1px solid var(--line);
@@ -2111,6 +2319,68 @@ SETTINGS_TEMPLATE = """
         padding: 0 0.85rem;
         width: 100%;
       }
+      input[type="time"] {
+        min-height: 2.55rem;
+        border-radius: 12px;
+        border: 1px solid var(--line);
+        background: var(--surface-2);
+        color: var(--text);
+        padding: 0 0.65rem;
+        width: 100%;
+      }
+      .schedule-note {
+        margin-top: 0.7rem;
+        color: var(--muted);
+        line-height: 1.45;
+      }
+      .schedule-list {
+        display: grid;
+        gap: 0.5rem;
+        margin-top: 0.85rem;
+      }
+      .schedule-row {
+        display: grid;
+        grid-template-columns: minmax(120px, 1fr) minmax(90px, 0.7fr) minmax(90px, 0.7fr) auto;
+        gap: 0.55rem;
+        align-items: center;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 0.55rem;
+        background: rgba(6, 13, 20, 0.58);
+      }
+      .schedule-day {
+        min-width: 0;
+        font-weight: 850;
+      }
+      .schedule-row label {
+        display: grid;
+        gap: 0.24rem;
+        color: var(--muted);
+        font-size: 0.72rem;
+        font-weight: 800;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+      .schedule-check {
+        display: inline-grid;
+        grid-template-columns: auto auto;
+        gap: 0.4rem;
+        align-items: center;
+        justify-content: end;
+        color: var(--text);
+        text-transform: none;
+        letter-spacing: 0;
+      }
+      .schedule-check input {
+        width: 1.05rem;
+        height: 1.05rem;
+        accent-color: var(--good);
+      }
+      .schedule-actions {
+        display: flex;
+        justify-content: flex-end;
+        margin-top: 0.75rem;
+      }
       .meta-grid {
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2247,8 +2517,8 @@ SETTINGS_TEMPLATE = """
         .meta-grid,
         .select-row { grid-template-columns: 1fr; }
         .tabs {
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-          width: min(100%, 520px);
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          width: min(100%, 620px);
           margin-inline: auto;
         }
         .tab {
@@ -2272,6 +2542,18 @@ SETTINGS_TEMPLATE = """
         }
         .archive-row {
           grid-template-columns: 1fr;
+        }
+        .schedule-row {
+          grid-template-columns: 1fr 1fr;
+        }
+        .schedule-day {
+          grid-column: 1 / -1;
+        }
+        .schedule-check {
+          justify-content: start;
+        }
+        .schedule-actions .button {
+          width: 100%;
         }
         .archive-actions .button {
           flex: 1;
@@ -2361,6 +2643,55 @@ SETTINGS_TEMPLATE = """
                 </button>
               </form>
             </div>
+          </section>
+
+          <section class="card">
+            <div class="card-head">
+              <div>
+                <span class="label">Schedule</span>
+                <h2>{{ selected.label }} Timing</h2>
+              </div>
+              {% if selected_schedule and selected_schedule.editable %}
+                <span class="pill good">Transcription</span>
+              {% else %}
+                <span class="pill">WebCall</span>
+              {% endif %}
+            </div>
+            {% if selected_schedule %}
+              <p class="schedule-note">{{ selected_schedule.note }}</p>
+              {% if selected_schedule.editable %}
+                <form method="post" action="{{ url_for('set_room_schedule', room_slug=selected.slug) }}">
+                  <input type="hidden" name="schedule_count" value="{{ selected_schedule.rows|length }}">
+                  <div class="schedule-list">
+                    {% for row in selected_schedule.rows %}
+                      <div class="schedule-row">
+                        <div class="schedule-day">
+                          {{ row.day_label }}
+                          <input type="hidden" name="schedule_day_{{ loop.index0 }}" value="{{ row.day }}">
+                        </div>
+                        <label>
+                          Start
+                          <input type="time" name="schedule_start_{{ loop.index0 }}" value="{{ row.start_time }}" required>
+                        </label>
+                        <label>
+                          Soft End
+                          <input type="time" name="schedule_end_{{ loop.index0 }}" value="{{ row.end_time }}" required>
+                        </label>
+                        <label class="schedule-check">
+                          <input type="checkbox" name="schedule_enabled_{{ loop.index0 }}" value="1" {% if row.enabled %}checked{% endif %}>
+                          On
+                        </label>
+                      </div>
+                    {% endfor %}
+                  </div>
+                  <div class="schedule-actions">
+                    <button class="button" type="submit">Save Schedule</button>
+                  </div>
+                </form>
+              {% endif %}
+            {% else %}
+              <p class="schedule-note">No schedule source is configured for this room.</p>
+            {% endif %}
           </section>
 
           <section class="card">
