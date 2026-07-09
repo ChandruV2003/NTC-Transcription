@@ -1,8 +1,10 @@
 # NTC Transcription
 
-Public read-only transcription display for NTC Newark.
+Public transcription display and private source controls for NTC Newark.
 
-This service is intentionally separate from WebCall and the internal Translator control panel. It reads transcript rows from the shared NTC SQLite database and renders a simple public transcription page. It does not expose meeting state, source status, translation settings, audio output controls, or internal room controls.
+This service is intentionally separate from WebCall and the internal Translator control panel. `/transcription` is the public display surface. `/transcription/settings` is the private control surface for choosing the active source, monitoring source-agent health, viewing transcript sessions, and managing translation output where configured.
+
+Only one visible transcription source should be active at a time. The current source set is Room A, Room B, and the convention laptop. Room A and Room B can still be started by WebCall meeting automation, but transcription audio is not tapped from the WebCall process. Source agents send audio directly to NTC Transcription, which delegates speech recognition to the configured Whisper backend.
 
 ## Runtime
 
@@ -19,12 +21,13 @@ This service is intentionally separate from WebCall and the internal Translator 
 - `/api/public/transcription/<room-slug>/segments`
 - `/api/internal/transcription/<room-slug>/segments`
 
-`/transcription` defaults to Room A. Room aliases include `room-a`, `room-b`, and
-`convention`, which maps to the `convention-laptop` room. The legacy `/transcribe`
-page URLs redirect to `/transcription`, and the legacy public API path remains
-available as a compatibility alias. The APIs return only the recent live
-transcription window and are not transcript archives. The internal API is for the
-`NTC-Translator` container to read current transcript text over the Docker network.
+`/transcription` renders the configured default room from `NTC_TRANSCRIPTION_DEFAULT_ROOM`.
+Room aliases include `room-a`, `room-b`, and `convention`, which maps to the
+`convention-laptop` room. The legacy `/transcribe` page URLs redirect to
+`/transcription`, and the legacy public API path remains available as a
+compatibility alias. The APIs return only the recent live transcription window and
+are not transcript archives. The internal API is for the `NTC-Translator`
+container to read current transcript text over the Docker network.
 
 ## Local Validation
 

@@ -307,6 +307,28 @@ class TranscriptionTests(unittest.TestCase):
                 0,
             )
 
+    def test_enabling_one_transcription_source_disables_the_other_visible_sources(self):
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute("UPDATE rooms SET transcription_enabled = 1 WHERE slug IN ('room-a', 'room-b')")
+        self._login_settings()
+
+        response = self.client.post(
+            "/transcription/settings/rooms/room-b/transcription",
+            data={"transcription_enabled": "1"},
+            follow_redirects=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        with sqlite3.connect(self.db_path) as connection:
+            rows = dict(
+                connection.execute(
+                    "SELECT slug, transcription_enabled FROM rooms WHERE slug IN ('room-a', 'room-b', 'convention-laptop')"
+                ).fetchall()
+            )
+        self.assertEqual(rows["room-a"], 0)
+        self.assertEqual(rows["room-b"], 1)
+        self.assertEqual(rows["convention-laptop"], 0)
+
     def test_manual_transcription_session_has_printable_report_and_csv(self):
         self._login_settings()
         self.client.post(

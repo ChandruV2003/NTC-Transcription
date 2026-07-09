@@ -465,14 +465,67 @@ class TranscriptionStore:
             )
         return rooms
 
-    def set_room_transcription_enabled(self, room_slug: str, enabled: bool) -> bool:
+    def set_room_transcription_enabled(
+        self,
+        room_slug: str,
+        enabled: bool,
+        *,
+        exclusive_room_slugs: tuple[str, ...] | None = None,
+    ) -> bool:
         timestamp = datetime.now(timezone.utc).isoformat()
+        actor = "/transcription/settings"
+        exclusive_room_slugs = tuple(
+            slug for slug in (exclusive_room_slugs or ())
+            if slug and slug != room_slug
+        )
         with self._connect(readonly=False) as connection:
             previous = connection.execute(
                 "SELECT label, transcription_enabled FROM rooms WHERE slug = ?",
                 (room_slug,),
             ).fetchone()
-            was_enabled = bool(previous["transcription_enabled"]) if previous else False
+            if not previous:
+                return False
+
+            was_enabled = bool(previous["transcription_enabled"])
+            disabled_slugs: list[str] = []
+            if enabled and exclusive_room_slugs:
+                placeholders = ",".join("?" for _ in exclusive_room_slugs)
+                disabled_rows = connection.execute(
+                    f"""
+                    SELECT slug
+                    FROM rooms
+                    WHERE slug IN ({placeholders})
+                      AND transcription_enabled = 1
+                    """,
+                    exclusive_room_slugs,
+                ).fetchall()
+                disabled_slugs = [row["slug"] for row in disabled_rows]
+                if disabled_slugs:
+                    disabled_placeholders = ",".join("?" for _ in disabled_slugs)
+                    connection.execute(
+                        f"""
+                        UPDATE rooms
+                        SET transcription_enabled = 0, updated_at = ?
+                        WHERE slug IN ({disabled_placeholders})
+                        """,
+                        (timestamp, *disabled_slugs),
+                    )
+                    for disabled_slug in disabled_slugs:
+                        self._end_transcription_sessions(
+                            connection,
+                            disabled_slug,
+                            actor=actor,
+                            ended_at=timestamp,
+                        )
+                        self._record_event(
+                            connection,
+                            component="transcription",
+                            event_type="transcription-exclusive-source-disabled",
+                            message=f"Transcription disabled for {disabled_slug} because {room_slug} was selected.",
+                            room_slug=disabled_slug,
+                            details={"selected_room_slug": room_slug, "surface": actor},
+                        )
+
             cursor = connection.execute(
                 """
                 UPDATE rooms
@@ -488,7 +541,7 @@ class TranscriptionStore:
                     connection,
                     room_slug,
                     trigger_mode="manual",
-                    actor="/transcription/settings",
+                    actor=actor,
                     started_at=timestamp,
                 )
             elif not enabled and was_enabled:
@@ -496,7 +549,7 @@ class TranscriptionStore:
                     connection,
                     room_slug,
                     trigger_mode="manual",
-                    actor="/transcription/settings",
+                    actor=actor,
                     ended_at=timestamp,
                 )
             self._record_event(
@@ -505,7 +558,11 @@ class TranscriptionStore:
                 event_type="transcription-config-updated",
                 message=f"Transcription {'enabled' if enabled else 'disabled'} for {room_slug}.",
                 room_slug=room_slug,
-                details={"transcription_enabled": bool(enabled), "surface": "/transcription/settings"},
+                details={
+                    "transcription_enabled": bool(enabled),
+                    "surface": actor,
+                    "exclusive_disabled_slugs": disabled_slugs,
+                },
             )
             return True
 
@@ -1105,7 +1162,7 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
             return jsonify({"error": "unknown room"}), 404
         value = str(request.form.get("transcription_enabled", "")).strip().lower()
         enabled = value in {"1", "true", "yes", "on"}
-        transcription_store.set_room_transcription_enabled(room["slug"], enabled)
+        transcription_store.set_room_transcription_enabled(room["slug"], enabled, exclusive_room_slugs=_visible_rooms())
         return redirect(
             url_for(
                 "transcription_settings",
