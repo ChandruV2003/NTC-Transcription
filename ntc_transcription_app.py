@@ -8,8 +8,11 @@ import sqlite3
 import csv
 import io
 import json
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from flask import Flask, Response, abort, jsonify, redirect, render_template_string, request, send_file, session, url_for
 
@@ -32,6 +35,7 @@ TRANSLATION_LANGUAGE_LABELS = {item["code"]: item["label"] for item in TRANSLATI
 TRANSLATION_OUTPUT_HOST_SLUGS = {"hp-envy-16-ad0xx"}
 BRAND_BACKGROUND_FILENAME = "ntc-embossed-background.jpg"
 DEFAULT_BRAND_BACKGROUND_PATH = Path(__file__).resolve().parent / "assets" / BRAND_BACKGROUND_FILENAME
+WEEKDAY_KEYS = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
 
 
 def _canonical_room_slug(room_slug: str | None) -> str:
@@ -42,6 +46,11 @@ def _canonical_room_slug(room_slug: str | None) -> str:
 def _csv_tuple(value: str, default: tuple[str, ...]) -> tuple[str, ...]:
     items = tuple(item.strip() for item in value.split(",") if item.strip())
     return items or default
+
+
+def _config_enabled(app, name: str, *, default: bool = False) -> bool:
+    raw = str(app.config.get(name, "1" if default else "0")).strip().lower()
+    return raw not in {"", "0", "false", "no", "off"}
 
 
 def _source_status(transcription_enabled: bool, source_requested: bool, source_ingesting: bool) -> tuple[str, str]:
@@ -471,9 +480,13 @@ class TranscriptionStore:
         enabled: bool,
         *,
         exclusive_room_slugs: tuple[str, ...] | None = None,
+        actor: str = "/transcription/settings",
+        trigger_mode: str = "manual",
+        open_session: bool = True,
     ) -> bool:
         timestamp = datetime.now(timezone.utc).isoformat()
-        actor = "/transcription/settings"
+        actor = actor or "/transcription/settings"
+        trigger_mode = trigger_mode or "manual"
         exclusive_room_slugs = tuple(
             slug for slug in (exclusive_room_slugs or ())
             if slug and slug != room_slug
@@ -536,19 +549,19 @@ class TranscriptionStore:
             )
             if not cursor.rowcount:
                 return False
-            if enabled and not was_enabled:
+            if open_session and enabled and not was_enabled:
                 self._begin_transcription_session(
                     connection,
                     room_slug,
-                    trigger_mode="manual",
+                    trigger_mode=trigger_mode,
                     actor=actor,
                     started_at=timestamp,
                 )
-            elif not enabled and was_enabled:
+            elif open_session and not enabled and was_enabled:
                 self._end_transcription_sessions(
                     connection,
                     room_slug,
-                    trigger_mode="manual",
+                    trigger_mode=trigger_mode,
                     actor=actor,
                     ended_at=timestamp,
                 )
@@ -618,6 +631,84 @@ class TranscriptionStore:
             "last_received_at": (row or {})["last_received_at"],
         }
 
+    def due_schedule_starts(
+        self,
+        host_slugs: tuple[str, ...],
+        *,
+        visible_room_slugs: tuple[str, ...],
+        when: datetime | None = None,
+        grace_minutes: int = 10,
+    ) -> list[dict]:
+        host_slugs = tuple(slug for slug in host_slugs if slug)
+        visible_room_slugs = tuple(slug for slug in visible_room_slugs if slug)
+        if not host_slugs or not visible_room_slugs:
+            return []
+        current = when or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        current = current.astimezone(timezone.utc)
+        host_placeholders = ",".join("?" for _ in host_slugs)
+        room_placeholders = ",".join("?" for _ in visible_room_slugs)
+        with self._connect(readonly=True) as connection:
+            table_names = {
+                row["name"]
+                for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            }
+            if not {"schedules", "hosts", "rooms"}.issubset(table_names):
+                return []
+            rows = connection.execute(
+                f"""
+                SELECT schedules.id,
+                       schedules.host_slug,
+                       schedules.day,
+                       schedules.start_time,
+                       schedules.end_time,
+                       hosts.room_slug,
+                       hosts.label AS host_label,
+                       hosts.timezone,
+                       rooms.label AS room_label
+                FROM schedules
+                JOIN hosts ON hosts.slug = schedules.host_slug
+                JOIN rooms ON rooms.slug = hosts.room_slug
+                WHERE schedules.enabled = 1
+                  AND hosts.enabled = 1
+                  AND rooms.enabled = 1
+                  AND schedules.host_slug IN ({host_placeholders})
+                  AND rooms.slug IN ({room_placeholders})
+                """,
+                (*host_slugs, *visible_room_slugs),
+            ).fetchall()
+
+        due: list[dict] = []
+        grace = max(1, int(grace_minutes or 1))
+        for row in rows:
+            local_now = current.astimezone(_zoneinfo_or_utc(row["timezone"]))
+            day = WEEKDAY_KEYS[local_now.weekday()]
+            if (row["day"] or "").upper() != day:
+                continue
+            start_minutes = _parse_hhmm(row["start_time"])
+            if start_minutes is None:
+                continue
+            now_minutes = local_now.hour * 60 + local_now.minute
+            minutes_after_start = now_minutes - start_minutes
+            if minutes_after_start < 0 or minutes_after_start >= grace:
+                continue
+            due.append(
+                {
+                    "schedule_id": int(row["id"]),
+                    "host_slug": row["host_slug"],
+                    "host_label": row["host_label"] or row["host_slug"],
+                    "room_slug": row["room_slug"],
+                    "room_label": row["room_label"] or row["room_slug"],
+                    "day": day,
+                    "start_time": row["start_time"],
+                    "end_time": row["end_time"],
+                    "local_date": local_now.date().isoformat(),
+                    "timezone": row["timezone"] or "UTC",
+                }
+            )
+        return due
+
     def _begin_transcription_session(
         self,
         connection: sqlite3.Connection,
@@ -658,6 +749,38 @@ class TranscriptionStore:
             ),
         )
         return int(cursor.lastrowid)
+
+    def start_transcription_session_boundary(
+        self,
+        room_slug: str,
+        *,
+        host_slug: str | None = None,
+        trigger_mode: str = "schedule",
+        actor: str = "transcription-scheduler",
+        started_at: str | None = None,
+    ) -> int:
+        timestamp = started_at or datetime.now(timezone.utc).isoformat()
+        with self._connect(readonly=False) as connection:
+            previous = connection.execute(
+                "SELECT slug FROM rooms WHERE slug = ?",
+                (room_slug,),
+            ).fetchone()
+            if not previous:
+                return 0
+            self._end_transcription_sessions(
+                connection,
+                room_slug,
+                actor=actor,
+                ended_at=timestamp,
+            )
+            return self._begin_transcription_session(
+                connection,
+                room_slug,
+                host_slug=host_slug,
+                trigger_mode=trigger_mode,
+                actor=actor,
+                started_at=timestamp,
+            )
 
     def _end_transcription_sessions(
         self,
@@ -931,6 +1054,26 @@ def _elapsed_label(start: datetime | None, current: datetime | None) -> str:
     return f"{minutes}:{seconds:02d}"
 
 
+def _parse_hhmm(value: str | None) -> int | None:
+    raw = (value or "").strip()
+    try:
+        hour_text, minute_text = raw.split(":", 1)
+        hour = int(hour_text)
+        minute = int(minute_text)
+    except (TypeError, ValueError):
+        return None
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        return None
+    return hour * 60 + minute
+
+
+def _zoneinfo_or_utc(timezone_name: str | None):
+    try:
+        return ZoneInfo((timezone_name or "").strip() or "UTC")
+    except ZoneInfoNotFoundError:
+        return timezone.utc
+
+
 def create_app(test_config: dict | None = None, *, store: TranscriptionStore | None = None) -> Flask:
     app = Flask(__name__)
     app.config.update(
@@ -956,6 +1099,10 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
         NTC_TRANSCRIPTION_MAX_CHUNK_SECONDS=float(os.getenv("NTC_TRANSCRIPTION_MAX_CHUNK_SECONDS", "6.0")),
         NTC_TRANSCRIPTION_CHUNK_OVERLAP_SECONDS=float(os.getenv("NTC_TRANSCRIPTION_CHUNK_OVERLAP_SECONDS", "0.75")),
         NTC_TRANSCRIPTION_QUEUE_SECONDS=float(os.getenv("NTC_TRANSCRIPTION_QUEUE_SECONDS", "120.0")),
+        NTC_TRANSCRIPTION_SCHEDULER_ENABLED=os.getenv("NTC_TRANSCRIPTION_SCHEDULER_ENABLED", "1"),
+        NTC_TRANSCRIPTION_SCHEDULER_HOSTS=os.getenv("NTC_TRANSCRIPTION_SCHEDULER_HOSTS", "convention-laptop"),
+        NTC_TRANSCRIPTION_SCHEDULER_POLL_SECONDS=float(os.getenv("NTC_TRANSCRIPTION_SCHEDULER_POLL_SECONDS", "20")),
+        NTC_TRANSCRIPTION_SCHEDULE_START_GRACE_MINUTES=int(os.getenv("NTC_TRANSCRIPTION_SCHEDULE_START_GRACE_MINUTES", "10")),
         NTC_TRANSCRIPTION_VAD_ENABLED=os.getenv("NTC_TRANSCRIPTION_VAD_ENABLED", "1"),
         NTC_TRANSCRIPTION_VAD_FRAME_MS=float(os.getenv("NTC_TRANSCRIPTION_VAD_FRAME_MS", "100")),
         NTC_TRANSCRIPTION_VAD_SILENCE_DB=float(os.getenv("NTC_TRANSCRIPTION_VAD_SILENCE_DB", "-46")),
@@ -982,6 +1129,9 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
 
     def _visible_rooms() -> tuple[str, ...]:
         return _csv_tuple(app.config.get("NTC_TRANSCRIPTION_VISIBLE_ROOMS", ""), DEFAULT_VISIBLE_ROOM_SLUGS)
+
+    def _scheduler_hosts() -> tuple[str, ...]:
+        return _csv_tuple(app.config.get("NTC_TRANSCRIPTION_SCHEDULER_HOSTS", ""), ())
 
     def _room_or_404(room_slug: str):
         canonical = _canonical_room_slug(room_slug)
@@ -1020,6 +1170,71 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
         selected_slug = _canonical_room_slug(selected_room_slug) or app.config["NTC_TRANSCRIPTION_DEFAULT_ROOM"]
         selected = next((room for room in rooms if room["slug"] == selected_slug), None) or (rooms[0] if rooms else None)
         return rooms, selected
+
+    scheduler_fired_keys: set[str] = set()
+    scheduler_lock = threading.Lock()
+
+    def run_transcription_scheduler_tick(when: datetime | None = None) -> list[dict]:
+        if not _config_enabled(app, "NTC_TRANSCRIPTION_SCHEDULER_ENABLED", default=True):
+            return []
+        due = transcription_store.due_schedule_starts(
+            _scheduler_hosts(),
+            visible_room_slugs=_visible_rooms(),
+            when=when,
+            grace_minutes=int(app.config.get("NTC_TRANSCRIPTION_SCHEDULE_START_GRACE_MINUTES") or 10),
+        )
+        started: list[dict] = []
+        with scheduler_lock:
+            for item in due:
+                key = f"{item['local_date']}:{item['host_slug']}:{item['day']}:{item['start_time']}"
+                if key in scheduler_fired_keys:
+                    continue
+                scheduler_fired_keys.add(key)
+                changed = transcription_store.set_room_transcription_enabled(
+                    item["room_slug"],
+                    True,
+                    exclusive_room_slugs=_visible_rooms(),
+                    actor="transcription-scheduler",
+                    trigger_mode="schedule",
+                    open_session=False,
+                )
+                session_id = transcription_store.start_transcription_session_boundary(
+                    item["room_slug"],
+                    host_slug=item["host_slug"],
+                    trigger_mode="schedule",
+                    actor="transcription-scheduler",
+                )
+                started.append({**item, "changed": changed})
+                app.logger.info(
+                    "transcription scheduler started room=%s host=%s schedule=%s %s-%s changed=%s session=%s",
+                    item["room_slug"],
+                    item["host_slug"],
+                    item["day"],
+                    item["start_time"],
+                    item["end_time"],
+                    changed,
+                    session_id,
+                )
+        return started
+
+    app.extensions["ntc_transcription_scheduler_tick"] = run_transcription_scheduler_tick
+
+    def transcription_scheduler_loop() -> None:
+        poll_seconds = max(5.0, float(app.config.get("NTC_TRANSCRIPTION_SCHEDULER_POLL_SECONDS") or 20.0))
+        while True:
+            try:
+                run_transcription_scheduler_tick()
+            except Exception:  # pragma: no cover - defensive runtime guard
+                app.logger.exception("transcription scheduler tick failed")
+            time.sleep(poll_seconds)
+
+    scheduler_db_ready = Path(app.config["NTC_DB_PATH"]).exists()
+    if (
+        scheduler_db_ready
+        and not app.config.get("TESTING")
+        and _config_enabled(app, "NTC_TRANSCRIPTION_SCHEDULER_ENABLED", default=True)
+    ):
+        threading.Thread(target=transcription_scheduler_loop, daemon=True, name="ntc-transcription-scheduler").start()
 
     @app.after_request
     def no_store(response):

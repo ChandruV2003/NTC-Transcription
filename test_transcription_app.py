@@ -34,9 +34,22 @@ def _create_test_db(path: Path):
                 fallback_audio_pattern TEXT NOT NULL DEFAULT '',
                 device_order_json TEXT NOT NULL DEFAULT '[]',
                 heartbeat_token TEXT NOT NULL DEFAULT '',
+                timezone TEXT NOT NULL DEFAULT 'America/New_York',
                 translation_output_enabled INTEGER NOT NULL DEFAULT 0,
                 translation_target_language TEXT NOT NULL DEFAULT 'zh-CN',
                 updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE schedules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                host_slug TEXT NOT NULL,
+                day TEXT NOT NULL,
+                start_time TEXT NOT NULL,
+                end_time TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1
             )
             """
         )
@@ -328,6 +341,98 @@ class TranscriptionTests(unittest.TestCase):
         self.assertEqual(rows["room-a"], 0)
         self.assertEqual(rows["room-b"], 1)
         self.assertEqual(rows["convention-laptop"], 0)
+
+    def test_convention_schedule_autostarts_without_soft_end_stop(self):
+        self.app.config["NTC_TRANSCRIPTION_VISIBLE_ROOMS"] = "room-a,room-b,convention-laptop"
+        self.app.config["NTC_TRANSCRIPTION_SCHEDULER_HOSTS"] = "convention-laptop"
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute("UPDATE rooms SET transcription_enabled = 1 WHERE slug = 'room-a'")
+            connection.execute(
+                """
+                INSERT INTO schedules (host_slug, day, start_time, end_time, enabled)
+                VALUES ('convention-laptop', 'THU', '19:00', '22:00', 1)
+                """
+            )
+
+        started = self.app.extensions["ntc_transcription_scheduler_tick"](
+            datetime(2026, 7, 9, 23, 0, tzinfo=timezone.utc)
+        )
+        after_end = self.app.extensions["ntc_transcription_scheduler_tick"](
+            datetime(2026, 7, 10, 2, 15, tzinfo=timezone.utc)
+        )
+
+        self.assertEqual(len(started), 1)
+        self.assertEqual(started[0]["room_slug"], "convention-laptop")
+        self.assertEqual(after_end, [])
+        with sqlite3.connect(self.db_path) as connection:
+            rows = dict(
+                connection.execute(
+                    "SELECT slug, transcription_enabled FROM rooms WHERE slug IN ('room-a', 'room-b', 'convention-laptop')"
+                ).fetchall()
+            )
+            session = connection.execute(
+                """
+                SELECT trigger_mode, started_by, ended_at
+                FROM transcription_sessions
+                WHERE room_slug = 'convention-laptop'
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        self.assertEqual(rows["room-a"], 0)
+        self.assertEqual(rows["room-b"], 0)
+        self.assertEqual(rows["convention-laptop"], 1)
+        self.assertEqual(session, ("schedule", "transcription-scheduler", None))
+
+    def test_convention_schedule_creates_boundary_when_already_enabled(self):
+        self.app.config["NTC_TRANSCRIPTION_VISIBLE_ROOMS"] = "room-a,room-b,convention-laptop"
+        self.app.config["NTC_TRANSCRIPTION_SCHEDULER_HOSTS"] = "convention-laptop"
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute(
+                "UPDATE rooms SET transcription_enabled = 1 WHERE slug = 'convention-laptop'"
+            )
+            connection.execute(
+                """
+                INSERT INTO transcription_sessions (
+                    room_slug, host_slug, started_at, trigger_mode, started_by
+                )
+                VALUES (
+                    'convention-laptop',
+                    'convention-laptop',
+                    '2026-07-09T20:00:00+00:00',
+                    'manual',
+                    '/transcription/settings'
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO schedules (host_slug, day, start_time, end_time, enabled)
+                VALUES ('convention-laptop', 'THU', '19:00', '22:00', 1)
+                """
+            )
+
+        started = self.app.extensions["ntc_transcription_scheduler_tick"](
+            datetime(2026, 7, 9, 23, 0, tzinfo=timezone.utc)
+        )
+
+        self.assertEqual(len(started), 1)
+        with sqlite3.connect(self.db_path) as connection:
+            enabled = connection.execute(
+                "SELECT transcription_enabled FROM rooms WHERE slug = 'convention-laptop'"
+            ).fetchone()[0]
+            sessions = connection.execute(
+                """
+                SELECT trigger_mode, started_by, ended_at
+                FROM transcription_sessions
+                WHERE room_slug = 'convention-laptop'
+                ORDER BY id
+                """
+            ).fetchall()
+        self.assertEqual(enabled, 1)
+        self.assertEqual(sessions[0][0], "manual")
+        self.assertIsNotNone(sessions[0][2])
+        self.assertEqual(sessions[1], ("schedule", "transcription-scheduler", None))
 
     def test_manual_transcription_session_has_printable_report_and_csv(self):
         self._login_settings()
