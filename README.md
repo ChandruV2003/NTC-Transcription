@@ -18,6 +18,7 @@ Only one visible transcription source should be active at a time. The current so
 - `/healthz`
 - `/transcription`
 - `/transcription/<room-slug>`
+- `/transcription/capture/<source-host>`
 - `/api/public/transcription/<room-slug>/segments`
 - `/api/internal/transcription/<room-slug>/segments`
 
@@ -28,6 +29,21 @@ Room aliases include `room-a`, `room-b`, and `convention`, which maps to the
 compatibility alias. The APIs return only the recent live transcription window and
 are not transcript archives. The internal API is for the `NTC-Translator`
 container to read current transcript text over the Docker network.
+
+## Browser Source Capture
+
+Room C can use a mobile browser source such as the iPhone source host:
+
+```text
+/transcription/capture/iphone15pro?token=<source-token>
+```
+
+The page requests microphone access, keeps the capture foregrounded, converts
+the browser microphone stream to mono PCM16, and posts short chunks into the same
+source worker used by the native agents. NTC Transcription still delegates speech
+recognition to the configured Whisper backend; the phone is only an audio tap
+point. While a browser source is active for Room C, other Room C source agents
+are rejected so microphones are not mixed together.
 
 ## Local Validation
 

@@ -142,6 +142,7 @@ def _create_test_db(path: Path):
                 ("ntc-dante-room-b", "NTC-Dante Room B", "room-b", "[source-only] Primary Dante bridge feed.", 0, "dante-b-token"),
                 ("hp-pavilion-14m-ba1xx", "HP Pavilion", "room-b", "", 0, "room-b-token"),
                 ("convention-laptop", "Convention Laptop", "convention-laptop", "[source-only] Temporary convention source.", 0, "convention-token"),
+                ("iphone15pro", "iPhone 15 Pro", "convention-laptop", "[source-only] Browser microphone capture.", 0, "iphone-token"),
             ],
         )
         connection.executemany(
@@ -157,6 +158,7 @@ def _create_test_db(path: Path):
                 ("ntc-dante-room-b", 0, 0, "", "2026-05-31T12:00:00+00:00"),
                 ("hp-pavilion-14m-ba1xx", 0, 0, "SQ 3&4", "2026-05-31T12:00:00+00:00"),
                 ("convention-laptop", 0, 0, "", "2026-05-31T12:00:00+00:00"),
+                ("iphone15pro", 0, 0, "", "2026-05-31T12:00:00+00:00"),
             ],
         )
 
@@ -743,6 +745,74 @@ class TranscriptionTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 403)
+
+    def test_browser_capture_page_renders_iphone_source(self):
+        response = self.client.get("/transcription/capture/iphone15pro?token=iphone-token")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Room C Capture", response.data)
+        self.assertIn(b"iPhone 15 Pro", response.data)
+        self.assertIn(b"/transcription/api/source/browser/start/", response.data)
+        self.assertIn(b"getUserMedia", response.data)
+        self.assertIn(b"autoGainControl", response.data)
+
+    def test_browser_capture_start_rejects_bad_token(self):
+        response = self.client.post(
+            "/api/source/browser/start/iphone15pro?token=wrong",
+            json={"sample_rate_hz": 48000},
+        )
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_browser_capture_start_and_stop_record_pcm16_runtime(self):
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute("UPDATE rooms SET transcription_enabled = 1 WHERE slug = 'convention-laptop'")
+
+        started = self.client.post(
+            "/api/source/browser/start/iphone15pro?token=iphone-token",
+            json={"sample_rate_hz": 44100, "current_device": "iPhone microphone"},
+        )
+        chunk = self.client.post(
+            "/api/source/browser/chunk/iphone15pro?token=iphone-token&sample_rate_hz=44100",
+            data=(b"\x00\x00" * 2048),
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        stopped = self.client.post("/api/source/browser/stop/iphone15pro?token=iphone-token", json={})
+
+        self.assertEqual(started.status_code, 200)
+        self.assertEqual(chunk.status_code, 200)
+        self.assertEqual(stopped.status_code, 200)
+        payload = started.get_json()
+        self.assertEqual(payload["stream_profile"], "browser_pcm16")
+        self.assertEqual(payload["sample_rate_hz"], 44100)
+        with sqlite3.connect(self.db_path) as connection:
+            runtime = connection.execute(
+                """
+                SELECT desired_active, is_ingesting, current_device, stream_profile, stream_channels, sample_rate_hz, sample_bits
+                FROM source_runtime
+                WHERE host_slug = 'iphone15pro'
+                """
+            ).fetchone()
+        self.assertEqual(runtime, (1, 0, "iPhone microphone", "browser_pcm16", 1, 44100, 16))
+
+    def test_browser_capture_blocks_other_room_c_source_ingest(self):
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute("UPDATE rooms SET transcription_enabled = 1 WHERE slug = 'convention-laptop'")
+
+        started = self.client.post(
+            "/api/source/browser/start/iphone15pro?token=iphone-token",
+            json={"sample_rate_hz": 48000, "current_device": "iPhone microphone"},
+        )
+        laptop_ingest = self.client.post(
+            "/api/source/ingest/convention-laptop?token=convention-token",
+            data=b"\x00" * 32,
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        self.client.post("/api/source/browser/stop/iphone15pro?token=iphone-token", json={})
+
+        self.assertEqual(started.status_code, 200)
+        self.assertEqual(laptop_ingest.status_code, 409)
+        self.assertEqual(laptop_ingest.get_json()["active_host_slug"], "iphone15pro")
 
     def test_settings_collapses_multiple_hosts_per_room(self):
         with sqlite3.connect(self.db_path) as connection:

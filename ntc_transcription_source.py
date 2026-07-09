@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 import requests
-from flask import jsonify, request
+from flask import jsonify, render_template_string, request
 
 try:
     import audioop  # type: ignore
@@ -43,6 +43,457 @@ STREAM_PROFILES = {
         "bits_per_sample": 24,
     }
 }
+
+BROWSER_CAPTURE_STREAM_PROFILE = "browser_pcm16"
+BROWSER_CAPTURE_TEMPLATE = """
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#07111c">
+  <title>{{ title }}</title>
+  <link rel="icon" href="data:,">
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #07111c;
+      --panel: rgba(8, 18, 30, 0.86);
+      --line: rgba(119, 180, 224, 0.34);
+      --text: #f3f8ff;
+      --muted: #a8b9cb;
+      --good: #79edb5;
+      --bad: #ff9a9a;
+      --warn: #ffc06f;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100svh;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        linear-gradient(180deg, rgba(3, 8, 14, 0.22), rgba(3, 8, 14, 0.82)),
+        url("{{ brand_background_url }}") center / cover fixed,
+        var(--bg);
+      color: var(--text);
+    }
+    main {
+      width: min(680px, calc(100vw - 32px));
+      min-height: 100svh;
+      margin: 0 auto;
+      display: grid;
+      align-content: center;
+      gap: 18px;
+      padding: max(24px, env(safe-area-inset-top)) 0 max(24px, env(safe-area-inset-bottom));
+    }
+    header { text-align: center; }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      height: 28px;
+      padding: 0 14px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: #9fd4ff;
+      font-size: 13px;
+      font-weight: 900;
+      letter-spacing: .18em;
+      text-transform: uppercase;
+      background: rgba(10, 24, 39, 0.76);
+    }
+    h1 {
+      margin: 12px 0 0;
+      font-size: clamp(38px, 11vw, 70px);
+      line-height: .95;
+      letter-spacing: 0;
+    }
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 28px;
+      background: var(--panel);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 20px 80px rgba(0, 0, 0, 0.26);
+      padding: clamp(22px, 5vw, 34px);
+      backdrop-filter: blur(14px);
+    }
+    .status-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      margin-bottom: 22px;
+    }
+    .source-name {
+      min-width: 0;
+    }
+    .source-name span {
+      display: block;
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 800;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+    .source-name strong {
+      display: block;
+      margin-top: 4px;
+      font-size: clamp(26px, 7vw, 42px);
+      line-height: 1.04;
+    }
+    .pill {
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      min-height: 44px;
+      padding: 0 18px;
+      border-radius: 999px;
+      font-size: 17px;
+      font-weight: 900;
+      background: rgba(36, 48, 64, 0.78);
+      color: var(--muted);
+    }
+    .pill.good { background: rgba(31, 95, 68, 0.62); color: var(--good); }
+    .pill.bad { background: rgba(91, 49, 58, 0.62); color: var(--bad); }
+    .pill.warn { background: rgba(89, 68, 42, 0.66); color: var(--warn); }
+    .meter {
+      height: 18px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(4, 10, 18, 0.78);
+    }
+    .meter > div {
+      width: 0%;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, #6dd7ff, #79edb5);
+      transition: width 90ms linear;
+    }
+    .metrics {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin: 18px 0 24px;
+    }
+    .metric {
+      border: 1px solid rgba(119, 180, 224, 0.26);
+      border-radius: 18px;
+      padding: 14px;
+      background: rgba(5, 13, 22, 0.54);
+    }
+    .metric span {
+      display: block;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+    .metric strong {
+      display: block;
+      margin-top: 6px;
+      font-size: 24px;
+      line-height: 1.1;
+    }
+    .actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    button {
+      min-height: 64px;
+      border: 1px solid rgba(119, 180, 224, 0.42);
+      border-radius: 18px;
+      background: rgba(17, 37, 58, 0.92);
+      color: var(--text);
+      font: inherit;
+      font-size: 22px;
+      font-weight: 900;
+      cursor: pointer;
+    }
+    button.primary {
+      border-color: rgba(121, 237, 181, 0.58);
+      background: rgba(23, 95, 69, 0.78);
+      color: var(--good);
+    }
+    button.danger {
+      border-color: rgba(255, 154, 154, 0.50);
+      background: rgba(88, 41, 51, 0.72);
+      color: var(--bad);
+    }
+    button:disabled {
+      cursor: not-allowed;
+      opacity: .48;
+    }
+    .message {
+      min-height: 24px;
+      margin-top: 16px;
+      color: var(--muted);
+      font-size: 16px;
+      line-height: 1.35;
+    }
+    @media (max-width: 560px) {
+      main { width: min(100vw - 22px, 680px); }
+      .status-row, .actions { grid-template-columns: 1fr; }
+      .status-row { align-items: stretch; flex-direction: column; }
+      .pill { justify-content: center; }
+      .metrics { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <span class="eyebrow">Source Agent</span>
+      <h1>Room C Capture</h1>
+    </header>
+    <section class="panel">
+      <div class="status-row">
+        <div class="source-name">
+          <span>Input</span>
+          <strong>{{ host_label }}</strong>
+        </div>
+        <div class="pill" id="state-pill">Idle</div>
+      </div>
+      <div class="meter" aria-label="Input level"><div id="level-bar"></div></div>
+      <div class="metrics">
+        <div class="metric">
+          <span>Sample Rate</span>
+          <strong id="sample-rate">--</strong>
+        </div>
+        <div class="metric">
+          <span>Queued</span>
+          <strong id="queued">0</strong>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="primary" id="start-button" type="button">Start</button>
+        <button class="danger" id="stop-button" type="button" disabled>Stop</button>
+      </div>
+      <div class="message" id="message"></div>
+    </section>
+  </main>
+  <script>
+    const hostSlug = {{ host_slug_json }};
+    const token = {{ token_json }};
+    const startUrl = `/transcription/api/source/browser/start/${encodeURIComponent(hostSlug)}?token=${encodeURIComponent(token)}`;
+    const chunkUrl = `/transcription/api/source/browser/chunk/${encodeURIComponent(hostSlug)}?token=${encodeURIComponent(token)}`;
+    const stopUrl = `/transcription/api/source/browser/stop/${encodeURIComponent(hostSlug)}?token=${encodeURIComponent(token)}`;
+    const startButton = document.getElementById("start-button");
+    const stopButton = document.getElementById("stop-button");
+    const statePill = document.getElementById("state-pill");
+    const levelBar = document.getElementById("level-bar");
+    const sampleRateValue = document.getElementById("sample-rate");
+    const queuedValue = document.getElementById("queued");
+    const message = document.getElementById("message");
+
+    let mediaStream = null;
+    let audioContext = null;
+    let processor = null;
+    let sourceNode = null;
+    let wakeLock = null;
+    let captureActive = false;
+    let sampleRate = 48000;
+    let pendingChunks = [];
+    let sending = false;
+    let sampleBuffer = [];
+    let bufferedSamples = 0;
+
+    function setState(label, tone = "") {
+      statePill.textContent = label;
+      statePill.className = `pill ${tone}`.trim();
+    }
+
+    function setMessage(text) {
+      message.textContent = text || "";
+    }
+
+    async function postJson(url, payload) {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload || {})
+      });
+      if (!response.ok) {
+        let errorText = `${response.status}`;
+        try {
+          const body = await response.json();
+          errorText = body.error || errorText;
+        } catch (_) {}
+        throw new Error(errorText);
+      }
+      return response.json();
+    }
+
+    function pcm16BufferFromFloat32(channels) {
+      const merged = new Float32Array(bufferedSamples);
+      let offset = 0;
+      for (const item of channels) {
+        merged.set(item, offset);
+        offset += item.length;
+      }
+      sampleBuffer = [];
+      bufferedSamples = 0;
+
+      const output = new ArrayBuffer(merged.length * 2);
+      const view = new DataView(output);
+      let sumSquares = 0;
+      let peak = 0;
+      for (let index = 0; index < merged.length; index += 1) {
+        const sample = Math.max(-1, Math.min(1, merged[index] || 0));
+        const intSample = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+        view.setInt16(index * 2, intSample, true);
+        const abs = Math.abs(sample);
+        peak = Math.max(peak, abs);
+        sumSquares += sample * sample;
+      }
+      const rms = merged.length ? Math.sqrt(sumSquares / merged.length) : 0;
+      levelBar.style.width = `${Math.min(100, Math.round(Math.max(peak, rms * 2.2) * 100))}%`;
+      return output;
+    }
+
+    function queueSamples(input) {
+      if (!captureActive || !input || !input.length) return;
+      const copy = new Float32Array(input.length);
+      copy.set(input);
+      sampleBuffer.push(copy);
+      bufferedSamples += copy.length;
+      const targetSamples = Math.max(2048, Math.floor(sampleRate * 0.25));
+      if (bufferedSamples >= targetSamples) {
+        pendingChunks.push(pcm16BufferFromFloat32(sampleBuffer));
+        if (pendingChunks.length > 12) pendingChunks.splice(0, pendingChunks.length - 12);
+        queuedValue.textContent = String(pendingChunks.length);
+        drainChunks();
+      }
+    }
+
+    async function drainChunks() {
+      if (sending) return;
+      sending = true;
+      try {
+        while (captureActive && pendingChunks.length) {
+          const body = pendingChunks.shift();
+          queuedValue.textContent = String(pendingChunks.length);
+          const response = await fetch(`${chunkUrl}&sample_rate_hz=${encodeURIComponent(sampleRate)}`, {
+            method: "POST",
+            headers: {"Content-Type": "application/octet-stream"},
+            body
+          });
+          if (!response.ok) {
+            let text = `${response.status}`;
+            try {
+              const payload = await response.json();
+              text = payload.error || text;
+            } catch (_) {}
+            throw new Error(text);
+          }
+        }
+      } catch (error) {
+        setState("Error", "bad");
+        setMessage(error.message || "Audio upload failed.");
+        await stopCapture(false);
+      } finally {
+        sending = false;
+      }
+    }
+
+    async function requestWakeLock() {
+      try {
+        if ("wakeLock" in navigator) {
+          wakeLock = await navigator.wakeLock.request("screen");
+        }
+      } catch (_) {
+        wakeLock = null;
+      }
+    }
+
+    async function startCapture() {
+      if (!token) {
+        setState("Token Needed", "warn");
+        setMessage("Open the paired capture link from transcription settings.");
+        return;
+      }
+      setState("Starting", "warn");
+      setMessage("");
+      startButton.disabled = true;
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: true
+          }
+        });
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        await audioContext.resume();
+        sampleRate = Math.round(audioContext.sampleRate || 48000);
+        sampleRateValue.textContent = `${sampleRate} Hz`;
+        await postJson(startUrl, {
+          sample_rate_hz: sampleRate,
+          current_device: "iPhone microphone",
+          user_agent: navigator.userAgent
+        });
+        captureActive = true;
+        sourceNode = audioContext.createMediaStreamSource(mediaStream);
+        processor = audioContext.createScriptProcessor(4096, 1, 1);
+        processor.onaudioprocess = (event) => {
+          queueSamples(event.inputBuffer.getChannelData(0));
+        };
+        sourceNode.connect(processor);
+        processor.connect(audioContext.destination);
+        await requestWakeLock();
+        setState("Live", "good");
+        stopButton.disabled = false;
+      } catch (error) {
+        setState("Error", "bad");
+        setMessage(error.message || "Microphone start failed.");
+        await stopCapture(false);
+      } finally {
+        startButton.disabled = captureActive;
+      }
+    }
+
+    async function stopCapture(notifyServer = true) {
+      const wasActive = captureActive;
+      captureActive = false;
+      startButton.disabled = false;
+      stopButton.disabled = true;
+      if (processor) {
+        processor.disconnect();
+        processor.onaudioprocess = null;
+      }
+      if (sourceNode) sourceNode.disconnect();
+      if (audioContext) await audioContext.close().catch(() => {});
+      if (mediaStream) mediaStream.getTracks().forEach((track) => track.stop());
+      if (wakeLock) await wakeLock.release().catch(() => {});
+      processor = null;
+      sourceNode = null;
+      audioContext = null;
+      mediaStream = null;
+      wakeLock = null;
+      pendingChunks = [];
+      sampleBuffer = [];
+      bufferedSamples = 0;
+      queuedValue.textContent = "0";
+      levelBar.style.width = "0%";
+      if (notifyServer && wasActive) {
+        await postJson(stopUrl, {sample_rate_hz: sampleRate}).catch(() => {});
+      }
+      setState("Idle");
+    }
+
+    startButton.addEventListener("click", startCapture);
+    stopButton.addEventListener("click", () => stopCapture(true));
+    window.addEventListener("pagehide", () => {
+      if (captureActive) navigator.sendBeacon(stopUrl, new Blob(["{}"], {type: "application/json"}));
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible" && captureActive) requestWakeLock();
+    });
+  </script>
+</body>
+</html>
+"""
 
 
 def _utc_now() -> str:
@@ -437,6 +888,8 @@ def install_source_api(app, transcription_store) -> None:
     stream_hub = TranscriptionStreamHub()
     transcription_workers: dict[str, TranscriptionWorkerState] = {}
     transcription_lock = threading.Lock()
+    browser_capture_states: dict[str, dict] = {}
+    browser_capture_lock = threading.Lock()
 
     def source_base_url() -> str:
         configured = (app.config.get("NTC_TRANSCRIPTION_SOURCE_PUBLIC_BASE_URL") or "").strip().rstrip("/")
@@ -689,9 +1142,10 @@ def install_source_api(app, transcription_store) -> None:
         stale_state = None
         with transcription_lock:
             existing = transcription_workers.get(room_slug)
-            if existing and existing.worker_thread and existing.worker_thread.is_alive() and not existing.stop_event.is_set():
-                return
             if existing:
+                alive = existing.worker_thread and existing.worker_thread.is_alive() and not existing.stop_event.is_set()
+                if alive and existing.host_slug == host_slug:
+                    return
                 stale_state = transcription_workers.pop(room_slug, None)
         if stale_state:
             stale_state.stop_event.set()
@@ -701,8 +1155,11 @@ def install_source_api(app, transcription_store) -> None:
             transcription_workers[room_slug] = state
             state.worker_thread.start()
 
-    def stop_room_transcription(room_slug: str):
+    def stop_room_transcription(room_slug: str, host_slug: str | None = None):
         with transcription_lock:
+            state = transcription_workers.get(room_slug)
+            if state and host_slug and state.host_slug != host_slug:
+                return
             state = transcription_workers.pop(room_slug, None)
         if not state:
             return
@@ -719,6 +1176,143 @@ def install_source_api(app, transcription_store) -> None:
         if not host or not hmac.compare_digest(token, host.get("heartbeat_token", "")):
             return None
         return host
+
+    def auth_host_from_request(host_slug: str):
+        token = (
+            request.args.get("token")
+            or request.headers.get("X-NTC-Source-Token")
+            or ""
+        ).strip()
+        host = transcription_store.get_host((host_slug or "").strip(), include_secret=True)
+        if not host or not hmac.compare_digest(token, host.get("heartbeat_token", "")):
+            return None
+        return host
+
+    def browser_stream_settings(sample_rate_hz: int | str | None) -> dict:
+        try:
+            sample_rate = int(sample_rate_hz or 48000)
+        except (TypeError, ValueError):
+            sample_rate = 48000
+        return {
+            "stream_channels": 1,
+            "sample_rate_hz": max(8000, min(96000, sample_rate)),
+            "bits_per_sample": 16,
+        }
+
+    def browser_capture_snapshot(host: dict, stream_settings: dict) -> dict:
+        snapshot = dict(host)
+        runtime = dict((host.get("runtime") or {}))
+        runtime.update(
+            {
+                "stream_channels": stream_settings["stream_channels"],
+                "sample_rate_hz": stream_settings["sample_rate_hz"],
+                "sample_bits": stream_settings["bits_per_sample"],
+            }
+        )
+        snapshot["runtime"] = runtime
+        return snapshot
+
+    def active_browser_capture_for_room(room_slug: str, *, excluding_host_slug: str | None = None) -> dict | None:
+        now = time.time()
+        stale_seconds = max(3.0, float(app.config.get("NTC_TRANSCRIPTION_BROWSER_CAPTURE_STALE_SECONDS", 8.0)))
+        with browser_capture_lock:
+            for host_slug, state in browser_capture_states.items():
+                if excluding_host_slug and host_slug == excluding_host_slug:
+                    continue
+                if state.get("room_slug") == room_slug and now - float(state.get("last_seen", 0)) <= stale_seconds:
+                    return dict(state)
+        return None
+
+    def stop_browser_capture(host_slug: str, *, last_error: str = "") -> bool:
+        with browser_capture_lock:
+            state = browser_capture_states.pop(host_slug, None)
+        host = transcription_store.get_host(host_slug, include_secret=True)
+        room_slug = (state or {}).get("room_slug") or (host or {}).get("room_slug")
+        if not host or not room_slug:
+            return False
+        stream_settings = browser_stream_settings((state or {}).get("sample_rate_hz"))
+        stream_hub.finish_room(room_slug, host_slug)
+        stop_room_transcription(room_slug, host_slug)
+        transcription_store.record_source_heartbeat(
+            host_slug,
+            current_device=(state or {}).get("current_device") or (host.get("runtime") or {}).get("current_device", ""),
+            devices=[(state or {}).get("current_device") or "iPhone microphone"],
+            is_ingesting=False,
+            last_error=last_error,
+            desired_active=source_desired(transcription_store.get_host(host_slug) or host),
+            stream_profile=BROWSER_CAPTURE_STREAM_PROFILE,
+            stream_channels=stream_settings["stream_channels"],
+            sample_rate_hz=stream_settings["sample_rate_hz"],
+            sample_bits=stream_settings["bits_per_sample"],
+        )
+        return True
+
+    def start_browser_capture(host: dict, *, sample_rate_hz: int | str | None, current_device: str) -> tuple[dict | None, tuple[dict, int] | None]:
+        stream_settings = browser_stream_settings(sample_rate_hz)
+        if not source_desired(host):
+            transcription_store.record_source_heartbeat(
+                host["slug"],
+                current_device=current_device,
+                devices=[current_device],
+                is_ingesting=False,
+                last_error="Transcription is not requested or transcription provider is unavailable.",
+                desired_active=False,
+                stream_profile=BROWSER_CAPTURE_STREAM_PROFILE,
+                stream_channels=1,
+                sample_rate_hz=stream_settings["sample_rate_hz"],
+                sample_bits=16,
+            )
+            return None, ({"error": "transcription not requested"}, 409)
+        room_slug = host["room_slug"]
+        with browser_capture_lock:
+            other_browser_states = list(browser_capture_states.values())
+        for state in other_browser_states:
+            if state.get("room_slug") == room_slug and state.get("host_slug") != host["slug"]:
+                stop_browser_capture(state["host_slug"], last_error="Replaced by another Room C source.")
+        stream_hub.start_room(room_slug, host["slug"], **stream_settings)
+        transcription_store.record_source_heartbeat(
+            host["slug"],
+            current_device=current_device,
+            devices=[current_device],
+            is_ingesting=True,
+            last_error="",
+            desired_active=True,
+            stream_profile=BROWSER_CAPTURE_STREAM_PROFILE,
+            stream_channels=stream_settings["stream_channels"],
+            sample_rate_hz=stream_settings["sample_rate_hz"],
+            sample_bits=stream_settings["bits_per_sample"],
+        )
+        snapshot = browser_capture_snapshot(transcription_store.get_host(host["slug"]) or host, stream_settings)
+        start_room_transcription(room_slug, host["slug"], snapshot)
+        state = {
+            "host_slug": host["slug"],
+            "room_slug": room_slug,
+            "current_device": current_device,
+            "sample_rate_hz": stream_settings["sample_rate_hz"],
+            "last_seen": time.time(),
+        }
+        with browser_capture_lock:
+            browser_capture_states[host["slug"]] = state
+        return state, None
+
+    def browser_capture_cleanup_loop() -> None:
+        stale_seconds = max(3.0, float(app.config.get("NTC_TRANSCRIPTION_BROWSER_CAPTURE_STALE_SECONDS", 8.0)))
+        while True:
+            now = time.time()
+            stale_hosts = []
+            with browser_capture_lock:
+                for host_slug, state in browser_capture_states.items():
+                    if now - float(state.get("last_seen", 0)) > stale_seconds:
+                        stale_hosts.append(host_slug)
+            for host_slug in stale_hosts:
+                stop_browser_capture(
+                    host_slug,
+                    last_error=f"Browser capture disconnected for more than {int(stale_seconds)} seconds.",
+                )
+            time.sleep(max(1.0, min(5.0, stale_seconds / 2.0)))
+
+    if not app.config.get("TESTING"):
+        threading.Thread(target=browser_capture_cleanup_loop, daemon=True, name="ntc-browser-capture-cleanup").start()
 
     @app.post("/transcription/api/source/heartbeat")
     @app.post("/api/source/heartbeat")
@@ -781,6 +1375,98 @@ def install_source_api(app, transcription_store) -> None:
         )
         return jsonify({"ok": True})
 
+    @app.get("/transcription/capture")
+    @app.get("/transcription/capture/<host_slug>")
+    def transcription_browser_capture(host_slug: str | None = None):
+        resolved_host_slug = (host_slug or request.args.get("source") or "iphone15pro").strip()
+        host = transcription_store.get_host(resolved_host_slug, include_secret=False)
+        if not host:
+            return jsonify({"error": "unknown source"}), 404
+        token = (request.args.get("token") or "").strip()
+        return render_template_string(
+            BROWSER_CAPTURE_TEMPLATE,
+            title=f"{host['label']} Capture",
+            host_slug_json=json.dumps(host["slug"]),
+            token_json=json.dumps(token),
+            host_label=host["label"] or host["slug"],
+            brand_background_url="/transcription/brand/ntc-embossed-background.jpg",
+        )
+
+    @app.post("/transcription/api/source/browser/start/<host_slug>")
+    @app.post("/api/source/browser/start/<host_slug>")
+    def transcription_browser_capture_start(host_slug: str):
+        host = auth_host_from_request(host_slug)
+        if not host:
+            return jsonify({"error": "unauthorized"}), 403
+        payload = request.get_json(silent=True) or {}
+        current_device = (payload.get("current_device") or host.get("label") or "iPhone microphone").strip()
+        state, error = start_browser_capture(
+            host,
+            sample_rate_hz=payload.get("sample_rate_hz"),
+            current_device=current_device,
+        )
+        if error:
+            body, status = error
+            return jsonify(body), status
+        return jsonify(
+            {
+                "ok": True,
+                "project": "ntc-transcription",
+                "source": "browser",
+                "host_slug": host["slug"],
+                "room_slug": host["room_slug"],
+                "stream_profile": BROWSER_CAPTURE_STREAM_PROFILE,
+                "stream_channels": 1,
+                "sample_rate_hz": int((state or {}).get("sample_rate_hz") or 48000),
+                "sample_bits": 16,
+            }
+        )
+
+    @app.post("/transcription/api/source/browser/chunk/<host_slug>")
+    @app.post("/api/source/browser/chunk/<host_slug>")
+    def transcription_browser_capture_chunk(host_slug: str):
+        host = auth_host_from_request(host_slug)
+        if not host:
+            return jsonify({"error": "unauthorized"}), 403
+        current_device = (
+            request.headers.get("X-NTC-Current-Device")
+            or (host.get("runtime") or {}).get("current_device")
+            or host.get("label")
+            or "iPhone microphone"
+        ).strip()
+        state, error = start_browser_capture(
+            host,
+            sample_rate_hz=request.args.get("sample_rate_hz"),
+            current_device=current_device,
+        )
+        if error:
+            body, status = error
+            return jsonify(body), status
+        max_chunk_bytes = max(4096, int(app.config.get("NTC_TRANSCRIPTION_BROWSER_CAPTURE_MAX_CHUNK_BYTES", 524288)))
+        chunk = request.get_data(cache=False) or b""
+        if len(chunk) > max_chunk_bytes:
+            return jsonify({"error": "audio chunk too large"}), 413
+        usable = _align_pcm16_byte_count(len(chunk))
+        if usable <= 0:
+            return jsonify({"ok": True, "bytes": 0})
+        if usable != len(chunk):
+            chunk = chunk[:usable]
+        with browser_capture_lock:
+            if host["slug"] in browser_capture_states:
+                browser_capture_states[host["slug"]]["last_seen"] = time.time()
+        if not stream_hub.publish_from(host["room_slug"], host["slug"], chunk):
+            return jsonify({"error": "source is not active"}), 409
+        return jsonify({"ok": True, "bytes": len(chunk), "queued": True})
+
+    @app.post("/transcription/api/source/browser/stop/<host_slug>")
+    @app.post("/api/source/browser/stop/<host_slug>")
+    def transcription_browser_capture_stop(host_slug: str):
+        host = auth_host_from_request(host_slug)
+        if not host:
+            return jsonify({"error": "unauthorized"}), 403
+        stop_browser_capture(host["slug"])
+        return jsonify({"ok": True})
+
     @app.post("/transcription/api/source/ingest/<host_slug>")
     @app.post("/api/source/ingest/<host_slug>")
     def transcription_source_ingest(host_slug: str):
@@ -788,6 +1474,9 @@ def install_source_api(app, transcription_store) -> None:
         host = transcription_store.get_host(host_slug, include_secret=True)
         if not host or not hmac.compare_digest(token, host.get("heartbeat_token", "")):
             return jsonify({"error": "unauthorized"}), 403
+        active_browser = active_browser_capture_for_room(host["room_slug"], excluding_host_slug=host_slug)
+        if active_browser:
+            return jsonify({"error": "another source is active", "active_host_slug": active_browser["host_slug"]}), 409
         if not source_desired(host):
             transcription_store.record_source_heartbeat(
                 host_slug,
@@ -832,7 +1521,7 @@ def install_source_api(app, transcription_store) -> None:
                     break
         finally:
             stream_hub.finish_room(room_slug, host_slug)
-            stop_room_transcription(room_slug)
+            stop_room_transcription(room_slug, host_slug)
             transcription_store.record_source_heartbeat(
                 host_slug,
                 current_device=runtime.get("current_device", ""),

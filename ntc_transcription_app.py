@@ -34,7 +34,7 @@ ROOM_DISPLAY_LABELS = {
 ROOM_SOURCE_HOST_PREFERENCE = {
     "room-a": ("ntc-dante-room-a", "hp-envy-16-ad0xx"),
     "room-b": ("ntc-dante-room-b", "hp-pavilion-14m-ba1xx"),
-    "convention-laptop": ("convention-laptop",),
+    "convention-laptop": ("convention-laptop", "iphone15pro", "ipad-mini"),
 }
 TRANSLATION_LANGUAGE_OPTIONS = [
     {"code": "zh-CN", "label": "Mandarin Chinese"},
@@ -1350,6 +1350,8 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
         NTC_TRANSCRIPTION_MAX_CHUNK_SECONDS=float(os.getenv("NTC_TRANSCRIPTION_MAX_CHUNK_SECONDS", "6.0")),
         NTC_TRANSCRIPTION_CHUNK_OVERLAP_SECONDS=float(os.getenv("NTC_TRANSCRIPTION_CHUNK_OVERLAP_SECONDS", "0.75")),
         NTC_TRANSCRIPTION_QUEUE_SECONDS=float(os.getenv("NTC_TRANSCRIPTION_QUEUE_SECONDS", "120.0")),
+        NTC_TRANSCRIPTION_BROWSER_CAPTURE_STALE_SECONDS=float(os.getenv("NTC_TRANSCRIPTION_BROWSER_CAPTURE_STALE_SECONDS", "8.0")),
+        NTC_TRANSCRIPTION_BROWSER_CAPTURE_MAX_CHUNK_BYTES=int(os.getenv("NTC_TRANSCRIPTION_BROWSER_CAPTURE_MAX_CHUNK_BYTES", "524288")),
         NTC_TRANSCRIPTION_SCHEDULER_ENABLED=os.getenv("NTC_TRANSCRIPTION_SCHEDULER_ENABLED", "1"),
         NTC_TRANSCRIPTION_SCHEDULER_HOSTS=os.getenv("NTC_TRANSCRIPTION_SCHEDULER_HOSTS", "convention-laptop"),
         NTC_TRANSCRIPTION_SCHEDULER_POLL_SECONDS=float(os.getenv("NTC_TRANSCRIPTION_SCHEDULER_POLL_SECONDS", "20")),
