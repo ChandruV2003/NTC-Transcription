@@ -45,6 +45,24 @@ recognition to the configured Whisper backend; the phone is only an audio tap
 point. While a browser source is active for Room C, other Room C source agents
 are rejected so microphones are not mixed together.
 
+## ToneVision Bridge
+
+ToneVision can receive text through its transmitter websocket. The bridge tool
+publishes NTC Transcription segments into a ToneVision room without browser
+screen scraping:
+
+```bash
+python3 tools/tonevision_bridge.py \
+  --tonevision-base-url http://100.96.175.75:8080 \
+  --tonevision-room english \
+  --tonevision-pin '<room-pin>' \
+  --tonevision-admin-password '<admin-password>'
+```
+
+By default the bridge starts at the current transcription tail, so it only sends
+new segments. It also refuses to connect when ToneVision reports that a human
+typist is already active, unless `--force-takeover` is passed deliberately.
+
 ## Local Validation
 
 ```bash
