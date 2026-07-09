@@ -363,6 +363,7 @@ class TranscriptionTests(unittest.TestCase):
 
         self.assertEqual(len(started), 1)
         self.assertEqual(started[0]["room_slug"], "convention-laptop")
+        self.assertEqual(started[0]["scheduled_start_at"], "2026-07-09T23:00:00+00:00")
         self.assertEqual(after_end, [])
         with sqlite3.connect(self.db_path) as connection:
             rows = dict(
@@ -372,7 +373,7 @@ class TranscriptionTests(unittest.TestCase):
             )
             session = connection.execute(
                 """
-                SELECT trigger_mode, started_by, ended_at
+                SELECT started_at, trigger_mode, started_by, ended_at
                 FROM transcription_sessions
                 WHERE room_slug = 'convention-laptop'
                 ORDER BY id DESC
@@ -382,7 +383,10 @@ class TranscriptionTests(unittest.TestCase):
         self.assertEqual(rows["room-a"], 0)
         self.assertEqual(rows["room-b"], 0)
         self.assertEqual(rows["convention-laptop"], 1)
-        self.assertEqual(session, ("schedule", "transcription-scheduler", None))
+        self.assertEqual(
+            session,
+            ("2026-07-09T23:00:00+00:00", "schedule", "transcription-scheduler", None),
+        )
 
     def test_convention_schedule_creates_boundary_when_already_enabled(self):
         self.app.config["NTC_TRANSCRIPTION_VISIBLE_ROOMS"] = "room-a,room-b,convention-laptop"
@@ -415,8 +419,21 @@ class TranscriptionTests(unittest.TestCase):
         started = self.app.extensions["ntc_transcription_scheduler_tick"](
             datetime(2026, 7, 9, 23, 0, tzinfo=timezone.utc)
         )
+        restarted_app = create_app(
+            {
+                "TESTING": True,
+                "NTC_DB_PATH": str(self.db_path),
+                "NTC_TRANSCRIPTION_VISIBLE_ROOMS": "room-a,room-b,convention-laptop",
+                "NTC_TRANSCRIPTION_SCHEDULER_HOSTS": "convention-laptop",
+                "SECRET_KEY": "test-secret",
+            }
+        )
+        restarted = restarted_app.extensions["ntc_transcription_scheduler_tick"](
+            datetime(2026, 7, 9, 23, 5, tzinfo=timezone.utc)
+        )
 
         self.assertEqual(len(started), 1)
+        self.assertEqual(len(restarted), 1)
         with sqlite3.connect(self.db_path) as connection:
             enabled = connection.execute(
                 "SELECT transcription_enabled FROM rooms WHERE slug = 'convention-laptop'"
@@ -430,6 +447,7 @@ class TranscriptionTests(unittest.TestCase):
                 """
             ).fetchall()
         self.assertEqual(enabled, 1)
+        self.assertEqual(len(sessions), 2)
         self.assertEqual(sessions[0][0], "manual")
         self.assertIsNotNone(sessions[0][2])
         self.assertEqual(sessions[1], ("schedule", "transcription-scheduler", None))

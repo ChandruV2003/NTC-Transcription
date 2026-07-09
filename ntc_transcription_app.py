@@ -689,6 +689,14 @@ class TranscriptionStore:
             start_minutes = _parse_hhmm(row["start_time"])
             if start_minutes is None:
                 continue
+            start_hour = start_minutes // 60
+            start_minute = start_minutes % 60
+            scheduled_start = local_now.replace(
+                hour=start_hour,
+                minute=start_minute,
+                second=0,
+                microsecond=0,
+            )
             now_minutes = local_now.hour * 60 + local_now.minute
             minutes_after_start = now_minutes - start_minutes
             if minutes_after_start < 0 or minutes_after_start >= grace:
@@ -704,6 +712,7 @@ class TranscriptionStore:
                     "start_time": row["start_time"],
                     "end_time": row["end_time"],
                     "local_date": local_now.date().isoformat(),
+                    "scheduled_start_at": scheduled_start.astimezone(timezone.utc).isoformat(),
                     "timezone": row["timezone"] or "UTC",
                 }
             )
@@ -767,6 +776,21 @@ class TranscriptionStore:
             ).fetchone()
             if not previous:
                 return 0
+            active_for_start = connection.execute(
+                """
+                SELECT id
+                FROM transcription_sessions
+                WHERE room_slug = ?
+                  AND trigger_mode = ?
+                  AND started_at = ?
+                  AND ended_at IS NULL
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (room_slug, trigger_mode, timestamp),
+            ).fetchone()
+            if active_for_start:
+                return int(active_for_start["id"])
             self._end_transcription_sessions(
                 connection,
                 room_slug,
@@ -1203,6 +1227,7 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
                     host_slug=item["host_slug"],
                     trigger_mode="schedule",
                     actor="transcription-scheduler",
+                    started_at=item["scheduled_start_at"],
                 )
                 started.append({**item, "changed": changed})
                 app.logger.info(
