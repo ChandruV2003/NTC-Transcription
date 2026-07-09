@@ -292,7 +292,96 @@ class TranscriptionTests(unittest.TestCase):
         self.assertIn(b"data-status-url", response.data)
         self.assertIn(b"/api/internal/transcription/settings/status", response.data)
         self.assertIn(b"Schedule", response.data)
-        self.assertIn(b"follows the WebCall meeting schedule", response.data)
+        self.assertIn(b"WebCall rows are imported read-only", response.data)
+        self.assertIn(b"Transcription-only starts", response.data)
+
+    def test_room_ab_schedule_imports_webcall_rows_readonly(self):
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO schedules (host_slug, day, start_time, end_time, enabled)
+                VALUES ('hp-envy-16-ad0xx', 'WED', '19:00', '21:00', 1)
+                """
+            )
+        self._login_settings()
+
+        response = self.client.get("/transcription/settings?room=room-a")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"WebCall schedule", response.data)
+        self.assertIn(b"Imported from WebCall. On/off is read-only here.", response.data)
+        self.assertIn(b"Wednesday", response.data)
+        self.assertIn(b"19:00", response.data)
+        self.assertIn(b"disabled", response.data)
+        self.assertIn(b"Transcription-only starts", response.data)
+
+    def test_room_a_extra_schedule_does_not_change_webcall_schedule(self):
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO schedules (host_slug, day, start_time, end_time, enabled)
+                VALUES ('hp-envy-16-ad0xx', 'WED', '19:00', '21:00', 1)
+                """
+            )
+        self._login_settings()
+
+        response = self.client.post(
+            "/transcription/settings/rooms/room-a/schedule",
+            data={
+                "schedule_count": "1",
+                "schedule_day_0": "FRI",
+                "schedule_start_0": "10:00",
+                "schedule_end_0": "13:00",
+                "schedule_enabled_0": "1",
+            },
+            follow_redirects=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Room A transcription-only schedule updated.", response.data)
+        with sqlite3.connect(self.db_path) as connection:
+            webcall_rows = connection.execute(
+                """
+                SELECT host_slug, day, start_time, end_time, enabled
+                FROM schedules
+                WHERE host_slug = 'hp-envy-16-ad0xx'
+                """
+            ).fetchall()
+            transcription_rows = connection.execute(
+                """
+                SELECT room_slug, host_slug, day, start_time, end_time, enabled
+                FROM transcription_schedules
+                WHERE room_slug = 'room-a'
+                """
+            ).fetchall()
+        self.assertEqual(webcall_rows, [("hp-envy-16-ad0xx", "WED", "19:00", "21:00", 1)])
+        self.assertEqual(transcription_rows, [("room-a", "hp-envy-16-ad0xx", "FRI", "10:00", "13:00", 1)])
+
+    def test_room_a_transcription_only_schedule_autostarts_without_webcall(self):
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute("UPDATE rooms SET transcription_enabled = 1 WHERE slug = 'room-b'")
+            connection.execute(
+                """
+                INSERT INTO transcription_schedules (room_slug, host_slug, day, start_time, end_time, enabled)
+                VALUES ('room-a', 'hp-envy-16-ad0xx', 'FRI', '10:00', '13:00', 1)
+                """
+            )
+
+        started = self.app.extensions["ntc_transcription_scheduler_tick"](
+            datetime(2026, 7, 10, 14, 0, tzinfo=timezone.utc)
+        )
+
+        self.assertEqual(len(started), 1)
+        self.assertEqual(started[0]["room_slug"], "room-a")
+        self.assertEqual(started[0]["schedule_source"], "transcription")
+        with sqlite3.connect(self.db_path) as connection:
+            rows = dict(
+                connection.execute(
+                    "SELECT slug, transcription_enabled FROM rooms WHERE slug IN ('room-a', 'room-b')"
+                ).fetchall()
+            )
+        self.assertEqual(rows["room-a"], 1)
+        self.assertEqual(rows["room-b"], 0)
 
     def test_settings_uses_room_abc_tabs_and_preferred_room_source(self):
         self.app.config["NTC_TRANSCRIPTION_VISIBLE_ROOMS"] = "room-a,room-b,convention-laptop"
@@ -354,23 +443,23 @@ class TranscriptionTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"Room C schedule updated.", response.data)
+        self.assertIn(b"Room C transcription-only schedule updated.", response.data)
         self.assertIn(b"Room C Timing", response.data)
         self.assertIn(b"Soft End", response.data)
         with sqlite3.connect(self.db_path) as connection:
             rows = connection.execute(
                 """
-                SELECT host_slug, day, start_time, end_time, enabled
-                FROM schedules
-                WHERE host_slug = 'convention-laptop'
+                SELECT room_slug, host_slug, day, start_time, end_time, enabled
+                FROM transcription_schedules
+                WHERE room_slug = 'convention-laptop'
                 ORDER BY start_time
                 """
             ).fetchall()
         self.assertEqual(
             rows,
             [
-                ("convention-laptop", "THU", "10:00", "13:00", 1),
-                ("convention-laptop", "THU", "19:00", "22:00", 1),
+                ("convention-laptop", "convention-laptop", "THU", "10:00", "13:00", 1),
+                ("convention-laptop", "convention-laptop", "THU", "19:00", "22:00", 1),
             ],
         )
 
@@ -431,8 +520,8 @@ class TranscriptionTests(unittest.TestCase):
             connection.execute("UPDATE rooms SET transcription_enabled = 1 WHERE slug = 'room-a'")
             connection.execute(
                 """
-                INSERT INTO schedules (host_slug, day, start_time, end_time, enabled)
-                VALUES ('convention-laptop', 'THU', '19:00', '22:00', 1)
+                INSERT INTO transcription_schedules (room_slug, host_slug, day, start_time, end_time, enabled)
+                VALUES ('convention-laptop', 'convention-laptop', 'THU', '19:00', '22:00', 1)
                 """
             )
 
@@ -493,8 +582,8 @@ class TranscriptionTests(unittest.TestCase):
             )
             connection.execute(
                 """
-                INSERT INTO schedules (host_slug, day, start_time, end_time, enabled)
-                VALUES ('convention-laptop', 'THU', '19:00', '22:00', 1)
+                INSERT INTO transcription_schedules (room_slug, host_slug, day, start_time, end_time, enabled)
+                VALUES ('convention-laptop', 'convention-laptop', 'THU', '19:00', '22:00', 1)
                 """
             )
 

@@ -122,6 +122,20 @@ class TranscriptionStore:
 
                 CREATE INDEX IF NOT EXISTS idx_transcription_sessions_room_started
                 ON transcription_sessions(room_slug, started_at DESC);
+
+                CREATE TABLE IF NOT EXISTS transcription_schedules (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    room_slug TEXT NOT NULL,
+                    host_slug TEXT NOT NULL,
+                    day TEXT NOT NULL,
+                    start_time TEXT NOT NULL,
+                    end_time TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    updated_at TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_transcription_schedules_room
+                ON transcription_schedules(room_slug, day, start_time);
                 """
             )
 
@@ -523,9 +537,20 @@ class TranscriptionStore:
             ),
         )
 
-    def list_room_schedule(self, room_slug: str, *, scheduler_hosts: tuple[str, ...]):
+    def _schedule_row_payload(self, row: sqlite3.Row, *, source: str, readonly: bool) -> dict:
+        return {
+            "id": int(row["id"]),
+            "day": row["day"],
+            "day_label": WEEKDAY_LABELS.get(row["day"], row["day"]),
+            "start_time": row["start_time"],
+            "end_time": row["end_time"],
+            "enabled": bool(row["enabled"]),
+            "source": source,
+            "readonly": readonly,
+        }
+
+    def list_room_schedule(self, room_slug: str):
         room_slug = _canonical_room_slug(room_slug)
-        scheduler_hosts = tuple(slug for slug in scheduler_hosts if slug)
         with self._connect(readonly=True) as connection:
             room = connection.execute(
                 "SELECT slug, label FROM rooms WHERE slug = ?",
@@ -535,61 +560,67 @@ class TranscriptionStore:
                 return None
             host = self._room_schedule_host(connection, room_slug)
             host_slug = host["slug"] if host else ""
-            editable = bool(host_slug and host_slug in scheduler_hosts)
-            rows = []
-            if editable:
-                rows = [
-                    {
-                        "id": int(row["id"]),
-                        "day": row["day"],
-                        "day_label": WEEKDAY_LABELS.get(row["day"], row["day"]),
-                        "start_time": row["start_time"],
-                        "end_time": row["end_time"],
-                        "enabled": bool(row["enabled"]),
-                    }
+            order_sql = """
+                ORDER BY CASE day
+                    WHEN 'MON' THEN 1
+                    WHEN 'TUE' THEN 2
+                    WHEN 'WED' THEN 3
+                    WHEN 'THU' THEN 4
+                    WHEN 'FRI' THEN 5
+                    WHEN 'SAT' THEN 6
+                    WHEN 'SUN' THEN 7
+                    ELSE 8
+                END, start_time
+            """
+            webcall_rows = []
+            if host_slug and room_slug in {"room-a", "room-b"}:
+                webcall_rows = [
+                    self._schedule_row_payload(row, source="webcall", readonly=True)
                     for row in connection.execute(
-                        """
+                        f"""
                         SELECT id, day, start_time, end_time, enabled
                         FROM schedules
                         WHERE host_slug = ?
-                        ORDER BY CASE day
-                            WHEN 'MON' THEN 1
-                            WHEN 'TUE' THEN 2
-                            WHEN 'WED' THEN 3
-                            WHEN 'THU' THEN 4
-                            WHEN 'FRI' THEN 5
-                            WHEN 'SAT' THEN 6
-                            WHEN 'SUN' THEN 7
-                            ELSE 8
-                        END, start_time
+                        {order_sql}
                         """,
                         (host_slug,),
                     ).fetchall()
                 ]
-        if editable:
-            note = "Room C starts from this schedule. End times are soft reference only; transcription will not auto-stop if the meeting runs long."
+            transcription_rows = [
+                self._schedule_row_payload(row, source="transcription", readonly=False)
+                for row in connection.execute(
+                    f"""
+                    SELECT id, day, start_time, end_time, enabled
+                    FROM transcription_schedules
+                    WHERE room_slug = ?
+                    {order_sql}
+                    """,
+                    (room_slug,),
+                ).fetchall()
+            ]
+        if room_slug in {"room-a", "room-b"}:
+            note = "WebCall rows are imported read-only. Add transcription-only starts below for times when captions should run without starting WebCall."
         else:
-            note = f"{_room_display_label(room_slug, room['label'])} follows the WebCall meeting schedule. Configure Room A/B meeting times in WebCall, not here."
+            note = "Room C uses transcription-only starts. End times are soft reference only; transcription will not auto-stop if the meeting runs long."
         return {
             "room_slug": room_slug,
             "room_label": _room_display_label(room_slug, room["label"]),
             "host_slug": host_slug,
             "host_label": (host["label"] if host else "") or "No schedule source",
             "timezone": (host["timezone"] if host else "") or "America/New_York",
-            "editable": editable,
-            "rows": rows,
+            "editable": bool(host_slug),
+            "webcall_rows": webcall_rows,
+            "rows": transcription_rows,
             "note": note,
+            "weekday_keys": WEEKDAY_KEYS,
         }
 
     def replace_room_schedule(
         self,
         room_slug: str,
         rows: list[dict],
-        *,
-        scheduler_hosts: tuple[str, ...],
     ) -> bool:
         room_slug = _canonical_room_slug(room_slug)
-        scheduler_hosts = tuple(slug for slug in scheduler_hosts if slug)
         timestamp = datetime.now(timezone.utc).isoformat()
         with self._connect(readonly=False) as connection:
             room = connection.execute(
@@ -599,22 +630,26 @@ class TranscriptionStore:
             if not room:
                 return False
             host = self._room_schedule_host(connection, room_slug)
-            if not host or host["slug"] not in scheduler_hosts:
+            if not host:
                 return False
             host_slug = host["slug"]
-            connection.execute("DELETE FROM schedules WHERE host_slug = ?", (host_slug,))
+            connection.execute("DELETE FROM transcription_schedules WHERE room_slug = ?", (room_slug,))
             connection.executemany(
                 """
-                INSERT INTO schedules (host_slug, day, start_time, end_time, enabled)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO transcription_schedules (
+                    room_slug, host_slug, day, start_time, end_time, enabled, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
+                        room_slug,
                         host_slug,
                         row["day"],
                         row["start_time"],
                         row["end_time"],
                         1 if row.get("enabled") else 0,
+                        timestamp,
                     )
                     for row in rows
                 ],
@@ -796,43 +831,72 @@ class TranscriptionStore:
     ) -> list[dict]:
         host_slugs = tuple(slug for slug in host_slugs if slug)
         visible_room_slugs = tuple(slug for slug in visible_room_slugs if slug)
-        if not host_slugs or not visible_room_slugs:
+        if not visible_room_slugs:
             return []
         current = when or datetime.now(timezone.utc)
         if current.tzinfo is None:
             current = current.replace(tzinfo=timezone.utc)
         current = current.astimezone(timezone.utc)
-        host_placeholders = ",".join("?" for _ in host_slugs)
         room_placeholders = ",".join("?" for _ in visible_room_slugs)
         with self._connect(readonly=True) as connection:
             table_names = {
                 row["name"]
                 for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
             }
-            if not {"schedules", "hosts", "rooms"}.issubset(table_names):
+            if not {"hosts", "rooms"}.issubset(table_names):
                 return []
-            rows = connection.execute(
-                f"""
-                SELECT schedules.id,
-                       schedules.host_slug,
-                       schedules.day,
-                       schedules.start_time,
-                       schedules.end_time,
-                       hosts.room_slug,
-                       hosts.label AS host_label,
-                       hosts.timezone,
-                       rooms.label AS room_label
-                FROM schedules
-                JOIN hosts ON hosts.slug = schedules.host_slug
-                JOIN rooms ON rooms.slug = hosts.room_slug
-                WHERE schedules.enabled = 1
-                  AND hosts.enabled = 1
-                  AND rooms.enabled = 1
-                  AND schedules.host_slug IN ({host_placeholders})
-                  AND rooms.slug IN ({room_placeholders})
-                """,
-                (*host_slugs, *visible_room_slugs),
-            ).fetchall()
+            rows = []
+            if host_slugs and "schedules" in table_names:
+                host_placeholders = ",".join("?" for _ in host_slugs)
+                rows.extend(
+                    connection.execute(
+                        f"""
+                        SELECT 'webcall' AS schedule_source,
+                               schedules.id,
+                               schedules.host_slug,
+                               schedules.day,
+                               schedules.start_time,
+                               schedules.end_time,
+                               hosts.room_slug,
+                               hosts.label AS host_label,
+                               hosts.timezone,
+                               rooms.label AS room_label
+                        FROM schedules
+                        JOIN hosts ON hosts.slug = schedules.host_slug
+                        JOIN rooms ON rooms.slug = hosts.room_slug
+                        WHERE schedules.enabled = 1
+                          AND hosts.enabled = 1
+                          AND rooms.enabled = 1
+                          AND schedules.host_slug IN ({host_placeholders})
+                          AND rooms.slug IN ({room_placeholders})
+                        """,
+                        (*host_slugs, *visible_room_slugs),
+                    ).fetchall()
+                )
+            if "transcription_schedules" in table_names:
+                rows.extend(
+                    connection.execute(
+                        f"""
+                        SELECT 'transcription' AS schedule_source,
+                               transcription_schedules.id,
+                               transcription_schedules.host_slug,
+                               transcription_schedules.day,
+                               transcription_schedules.start_time,
+                               transcription_schedules.end_time,
+                               transcription_schedules.room_slug,
+                               hosts.label AS host_label,
+                               hosts.timezone,
+                               rooms.label AS room_label
+                        FROM transcription_schedules
+                        JOIN rooms ON rooms.slug = transcription_schedules.room_slug
+                        LEFT JOIN hosts ON hosts.slug = transcription_schedules.host_slug
+                        WHERE transcription_schedules.enabled = 1
+                          AND rooms.enabled = 1
+                          AND transcription_schedules.room_slug IN ({room_placeholders})
+                        """,
+                        visible_room_slugs,
+                    ).fetchall()
+                )
 
         due: list[dict] = []
         grace = max(1, int(grace_minutes or 1))
@@ -859,6 +923,7 @@ class TranscriptionStore:
             due.append(
                 {
                     "schedule_id": int(row["id"]),
+                    "schedule_source": row["schedule_source"],
                     "host_slug": row["host_slug"],
                     "host_label": row["host_label"] or row["host_slug"],
                     "room_slug": row["room_slug"],
@@ -1517,7 +1582,7 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
             return auth_response
         rooms, selected = _settings_context(request.args.get("room"))
         selected_schedule = (
-            transcription_store.list_room_schedule(selected["slug"], scheduler_hosts=_scheduler_hosts())
+            transcription_store.list_room_schedule(selected["slug"])
             if selected
             else None
         )
@@ -1527,6 +1592,7 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
             rooms=rooms,
             selected=selected,
             selected_schedule=selected_schedule,
+            weekday_labels=WEEKDAY_LABELS,
             transcript_archives=transcription_store.list_transcript_archives(_visible_rooms(), limit=8),
             language_options=TRANSLATION_LANGUAGE_OPTIONS,
             public_base=url_for("public_transcription"),
@@ -1561,15 +1627,9 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
         room = _room_or_404(room_slug)
         if not room:
             return jsonify({"error": "unknown room"}), 404
-        schedule = transcription_store.list_room_schedule(room["slug"], scheduler_hosts=_scheduler_hosts())
+        schedule = transcription_store.list_room_schedule(room["slug"])
         if not schedule or not schedule["editable"]:
-            return redirect(
-                url_for(
-                    "transcription_settings",
-                    room=room["slug"],
-                    error=f"{room['label']} schedule is controlled by WebCall.",
-                )
-            )
+            return redirect(url_for("transcription_settings", room=room["slug"], error="No transcription schedule source is configured for that room."))
         try:
             schedule_count = int(request.form.get("schedule_count", "0") or "0")
         except ValueError:
@@ -1579,6 +1639,8 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
             day = (request.form.get(f"schedule_day_{index}") or "").strip().upper()
             start_time = (request.form.get(f"schedule_start_{index}") or "").strip()
             end_time = (request.form.get(f"schedule_end_{index}") or "").strip()
+            if not day and not start_time and not end_time:
+                continue
             if day not in WEEKDAY_KEYS:
                 return redirect(
                     url_for("transcription_settings", room=room["slug"], error="Schedule contains an invalid day.")
@@ -1595,10 +1657,8 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
                     "enabled": request.form.get(f"schedule_enabled_{index}") == "1",
                 }
             )
-        if not rows:
-            return redirect(url_for("transcription_settings", room=room["slug"], error="At least one schedule row is required."))
-        transcription_store.replace_room_schedule(room["slug"], rows, scheduler_hosts=_scheduler_hosts())
-        return redirect(url_for("transcription_settings", room=room["slug"], message=f"{room['label']} schedule updated."))
+        transcription_store.replace_room_schedule(room["slug"], rows)
+        return redirect(url_for("transcription_settings", room=room["slug"], message=f"{room['label']} transcription-only schedule updated."))
 
     @app.post("/transcription/settings/rooms/<room_slug>/transcription")
     def set_room_transcription(room_slug: str):
@@ -2333,10 +2393,27 @@ SETTINGS_TEMPLATE = """
         color: var(--muted);
         line-height: 1.45;
       }
+      .schedule-section {
+        margin-top: 0.9rem;
+      }
+      .schedule-section-head {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 0.75rem;
+        margin-bottom: 0.5rem;
+      }
+      .schedule-section-head strong {
+        display: block;
+        line-height: 1.2;
+      }
+      .schedule-section-head span {
+        color: var(--muted);
+        font-size: 0.78rem;
+      }
       .schedule-list {
         display: grid;
         gap: 0.5rem;
-        margin-top: 0.85rem;
       }
       .schedule-row {
         display: grid;
@@ -2348,9 +2425,28 @@ SETTINGS_TEMPLATE = """
         padding: 0.55rem;
         background: rgba(6, 13, 20, 0.58);
       }
+      .schedule-row.is-readonly {
+        background: rgba(18, 34, 53, 0.38);
+      }
       .schedule-day {
         min-width: 0;
         font-weight: 850;
+      }
+      .schedule-time {
+        display: grid;
+        gap: 0.18rem;
+        color: var(--muted);
+        font-size: 0.72rem;
+        font-weight: 800;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+      .schedule-time strong {
+        color: var(--text);
+        font-size: 0.92rem;
+        line-height: 1.2;
+        letter-spacing: 0;
+        text-transform: none;
       }
       .schedule-row label {
         display: grid;
@@ -2376,10 +2472,76 @@ SETTINGS_TEMPLATE = """
         height: 1.05rem;
         accent-color: var(--good);
       }
+      .schedule-toggle {
+        appearance: none;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        min-height: 2.35rem;
+        padding: 0.46rem 0.7rem;
+        display: inline-grid;
+        grid-template-columns: 0.55rem auto;
+        align-items: center;
+        gap: 0.42rem;
+        background: var(--surface-2);
+        color: var(--muted);
+        font: inherit;
+        font-weight: 850;
+        cursor: pointer;
+      }
+      .schedule-toggle-dot {
+        width: 0.55rem;
+        height: 0.55rem;
+        border-radius: 999px;
+        background: currentColor;
+      }
+      .schedule-toggle.is-on {
+        border-color: rgba(116, 221, 180, 0.42);
+        background: var(--good-soft);
+        color: var(--good);
+      }
+      .schedule-toggle.is-off {
+        border-color: rgba(255, 155, 155, 0.34);
+        background: rgba(18, 34, 53, 0.74);
+        color: var(--muted);
+      }
+      .schedule-toggle[disabled] {
+        cursor: default;
+        opacity: 0.82;
+      }
+      .schedule-row-actions {
+        display: flex;
+        gap: 0.45rem;
+        align-items: center;
+        justify-content: flex-end;
+      }
+      .schedule-remove {
+        appearance: none;
+        border: 1px solid rgba(255, 155, 155, 0.34);
+        border-radius: 999px;
+        width: 2.35rem;
+        height: 2.35rem;
+        display: inline-grid;
+        place-items: center;
+        background: var(--bad-soft);
+        color: var(--bad);
+        font-size: 1.15rem;
+        font-weight: 850;
+        line-height: 1;
+        cursor: pointer;
+      }
       .schedule-actions {
         display: flex;
+        gap: 0.55rem;
+        flex-wrap: wrap;
         justify-content: flex-end;
         margin-top: 0.75rem;
+      }
+      .schedule-empty {
+        border: 1px dashed var(--line);
+        border-radius: 16px;
+        padding: 0.85rem;
+        color: var(--muted);
+        background: rgba(6, 13, 20, 0.34);
       }
       .meta-grid {
         display: grid;
@@ -2549,6 +2711,14 @@ SETTINGS_TEMPLATE = """
         .schedule-day {
           grid-column: 1 / -1;
         }
+        .schedule-row-actions {
+          grid-column: 1 / -1;
+          justify-content: stretch;
+        }
+        .schedule-row-actions .schedule-toggle {
+          flex: 1;
+          justify-content: center;
+        }
         .schedule-check {
           justify-content: start;
         }
@@ -2651,41 +2821,114 @@ SETTINGS_TEMPLATE = """
                 <span class="label">Schedule</span>
                 <h2>{{ selected.label }} Timing</h2>
               </div>
-              {% if selected_schedule and selected_schedule.editable %}
+              {% if selected_schedule and selected_schedule.webcall_rows and selected_schedule.rows %}
+                <span class="pill good">WebCall + Extra</span>
+              {% elif selected_schedule and selected_schedule.webcall_rows %}
+                <span class="pill">WebCall</span>
+              {% elif selected_schedule and selected_schedule.editable %}
                 <span class="pill good">Transcription</span>
               {% else %}
-                <span class="pill">WebCall</span>
+                <span class="pill">Not Configured</span>
               {% endif %}
             </div>
             {% if selected_schedule %}
               <p class="schedule-note">{{ selected_schedule.note }}</p>
-              {% if selected_schedule.editable %}
-                <form method="post" action="{{ url_for('set_room_schedule', room_slug=selected.slug) }}">
-                  <input type="hidden" name="schedule_count" value="{{ selected_schedule.rows|length }}">
+              {% if selected_schedule.webcall_rows %}
+                <div class="schedule-section">
+                  <div class="schedule-section-head">
+                    <strong>WebCall schedule</strong>
+                    <span>Imported from WebCall. On/off is read-only here.</span>
+                  </div>
                   <div class="schedule-list">
-                    {% for row in selected_schedule.rows %}
-                      <div class="schedule-row">
-                        <div class="schedule-day">
-                          {{ row.day_label }}
-                          <input type="hidden" name="schedule_day_{{ loop.index0 }}" value="{{ row.day }}">
+                    {% for row in selected_schedule.webcall_rows %}
+                      <div class="schedule-row is-readonly">
+                        <div class="schedule-day">{{ row.day_label }}</div>
+                        <div class="schedule-time">
+                          <span>Start</span>
+                          <strong>{{ row.start_time }}</strong>
                         </div>
-                        <label>
-                          Start
-                          <input type="time" name="schedule_start_{{ loop.index0 }}" value="{{ row.start_time }}" required>
-                        </label>
-                        <label>
-                          Soft End
-                          <input type="time" name="schedule_end_{{ loop.index0 }}" value="{{ row.end_time }}" required>
-                        </label>
-                        <label class="schedule-check">
-                          <input type="checkbox" name="schedule_enabled_{{ loop.index0 }}" value="1" {% if row.enabled %}checked{% endif %}>
-                          On
-                        </label>
+                        <div class="schedule-time">
+                          <span>End</span>
+                          <strong>{{ row.end_time }}</strong>
+                        </div>
+                        <button class="schedule-toggle {% if row.enabled %}is-on{% else %}is-off{% endif %}" type="button" disabled>
+                          <span class="schedule-toggle-dot" aria-hidden="true"></span>
+                          <span>{{ "ON" if row.enabled else "OFF" }}</span>
+                        </button>
                       </div>
                     {% endfor %}
                   </div>
-                  <div class="schedule-actions">
-                    <button class="button" type="submit">Save Schedule</button>
+                </div>
+              {% endif %}
+              {% if selected_schedule.editable %}
+                <form method="post" action="{{ url_for('set_room_schedule', room_slug=selected.slug) }}" data-schedule-form>
+                  <div class="schedule-section">
+                    <div class="schedule-section-head">
+                      <strong>Transcription-only starts</strong>
+                      <span>Starts captions without changing WebCall.</span>
+                    </div>
+                    <input type="hidden" name="schedule_count" value="{{ selected_schedule.rows|length }}" data-schedule-count>
+                    <div class="schedule-list" data-schedule-list>
+                      <p class="schedule-empty" data-schedule-empty {% if selected_schedule.rows %}hidden{% endif %}>No extra transcription starts are configured.</p>
+                    {% for row in selected_schedule.rows %}
+                      <div class="schedule-row" data-schedule-row>
+                        <div class="schedule-day">
+                          <select name="schedule_day_{{ loop.index0 }}" aria-label="Schedule day" data-schedule-field="day">
+                            {% for weekday in selected_schedule.weekday_keys %}
+                              <option value="{{ weekday }}" {% if row.day == weekday %}selected{% endif %}>{{ weekday_labels[weekday] }}</option>
+                            {% endfor %}
+                          </select>
+                        </div>
+                        <label>
+                          Start
+                          <input type="time" name="schedule_start_{{ loop.index0 }}" value="{{ row.start_time }}" required data-schedule-field="start">
+                        </label>
+                        <label>
+                          Soft End
+                          <input type="time" name="schedule_end_{{ loop.index0 }}" value="{{ row.end_time }}" required data-schedule-field="end">
+                        </label>
+                        <div class="schedule-row-actions">
+                          <input type="hidden" name="schedule_enabled_{{ loop.index0 }}" value="{{ "1" if row.enabled else "0" }}" data-schedule-field="enabled">
+                          <button class="schedule-toggle {% if row.enabled %}is-on{% else %}is-off{% endif %}" type="button" data-schedule-toggle>
+                            <span class="schedule-toggle-dot" aria-hidden="true"></span>
+                            <span>{{ "ON" if row.enabled else "OFF" }}</span>
+                          </button>
+                          <button class="schedule-remove" type="button" aria-label="Remove schedule row" data-remove-schedule-row>&times;</button>
+                        </div>
+                      </div>
+                    {% endfor %}
+                    </div>
+                    <template data-schedule-row-template>
+                      <div class="schedule-row" data-schedule-row>
+                        <div class="schedule-day">
+                          <select name="schedule_day___index__" aria-label="Schedule day" data-schedule-field="day">
+                            {% for weekday in selected_schedule.weekday_keys %}
+                              <option value="{{ weekday }}">{{ weekday_labels[weekday] }}</option>
+                            {% endfor %}
+                          </select>
+                        </div>
+                        <label>
+                          Start
+                          <input type="time" name="schedule_start___index__" value="19:00" required data-schedule-field="start">
+                        </label>
+                        <label>
+                          Soft End
+                          <input type="time" name="schedule_end___index__" value="22:00" required data-schedule-field="end">
+                        </label>
+                        <div class="schedule-row-actions">
+                          <input type="hidden" name="schedule_enabled___index__" value="1" data-schedule-field="enabled">
+                          <button class="schedule-toggle is-on" type="button" data-schedule-toggle>
+                            <span class="schedule-toggle-dot" aria-hidden="true"></span>
+                            <span>ON</span>
+                          </button>
+                          <button class="schedule-remove" type="button" aria-label="Remove schedule row" data-remove-schedule-row>&times;</button>
+                        </div>
+                      </div>
+                    </template>
+                    <div class="schedule-actions">
+                      <button class="button" type="button" data-add-schedule-row>Add Row</button>
+                      <button class="button primary" type="submit">Save Schedule</button>
+                    </div>
                   </div>
                 </form>
               {% endif %}
@@ -2850,6 +3093,70 @@ SETTINGS_TEMPLATE = """
           button.classList.toggle("is-off", !enabled);
         }
 
+        function updateScheduleEmpty(form) {
+          const empty = form.querySelector("[data-schedule-empty]");
+          if (!empty) return;
+          empty.hidden = form.querySelectorAll("[data-schedule-row]").length > 0;
+        }
+
+        function reindexScheduleRows(form) {
+          const rows = Array.from(form.querySelectorAll("[data-schedule-row]"));
+          const count = form.querySelector("[data-schedule-count]");
+          if (count) count.value = String(rows.length);
+          rows.forEach((row, index) => {
+            row.querySelector('[data-schedule-field="day"]')?.setAttribute("name", `schedule_day_${index}`);
+            row.querySelector('[data-schedule-field="start"]')?.setAttribute("name", `schedule_start_${index}`);
+            row.querySelector('[data-schedule-field="end"]')?.setAttribute("name", `schedule_end_${index}`);
+            row.querySelector('[data-schedule-field="enabled"]')?.setAttribute("name", `schedule_enabled_${index}`);
+          });
+          updateScheduleEmpty(form);
+        }
+
+        function bindScheduleRow(form, row) {
+          const toggle = row.querySelector("[data-schedule-toggle]");
+          const enabledInput = row.querySelector('[data-schedule-field="enabled"]');
+          if (toggle && enabledInput && !toggle.dataset.bound) {
+            toggle.dataset.bound = "1";
+            toggle.addEventListener("click", () => {
+              if (toggle.disabled) return;
+              const enabled = enabledInput.value !== "1";
+              enabledInput.value = enabled ? "1" : "0";
+              toggle.classList.toggle("is-on", enabled);
+              toggle.classList.toggle("is-off", !enabled);
+              const label = toggle.querySelector("span:last-child");
+              if (label) label.textContent = enabled ? "ON" : "OFF";
+            });
+          }
+          const remove = row.querySelector("[data-remove-schedule-row]");
+          if (remove && !remove.dataset.bound) {
+            remove.dataset.bound = "1";
+            remove.addEventListener("click", () => {
+              row.remove();
+              reindexScheduleRows(form);
+            });
+          }
+        }
+
+        function bindScheduleForms() {
+          document.querySelectorAll("[data-schedule-form]").forEach((form) => {
+            form.querySelectorAll("[data-schedule-row]").forEach((row) => bindScheduleRow(form, row));
+            const addButton = form.querySelector("[data-add-schedule-row]");
+            const template = form.querySelector("[data-schedule-row-template]");
+            const list = form.querySelector("[data-schedule-list]");
+            if (addButton && template && list && !addButton.dataset.bound) {
+              addButton.dataset.bound = "1";
+              addButton.addEventListener("click", () => {
+                const row = template.content.firstElementChild.cloneNode(true);
+                list.appendChild(row);
+                bindScheduleRow(form, row);
+                reindexScheduleRows(form);
+              });
+            }
+            form.addEventListener("submit", () => reindexScheduleRows(form));
+            reindexScheduleRows(form);
+          });
+        }
+
         function updateRoomDots(rooms) {
           const roomMap = new Map((rooms || []).map((room) => [room.slug, room]));
           document.querySelectorAll("[data-room-tab]").forEach((tab) => {
@@ -2946,6 +3253,7 @@ SETTINGS_TEMPLATE = """
         document.addEventListener("visibilitychange", () => {
           if (!document.hidden) refreshStatus();
         });
+        bindScheduleForms();
         refreshStatus();
       })();
     </script>
