@@ -756,6 +756,13 @@ class TranscriptionTests(unittest.TestCase):
         self.assertIn(b"getUserMedia", response.data)
         self.assertIn(b"autoGainControl", response.data)
         self.assertIn(b"Start Capture", response.data)
+        self.assertIn(b"toggleMute", response.data)
+        self.assertIn(b"Mute Mic", response.data)
+        self.assertIn(b"[Song]", response.data)
+        self.assertIn(b"[Prophecy]", response.data)
+        self.assertIn(b"Take ToneVision", response.data)
+        self.assertIn(b"/transcription/api/source/browser/marker/", response.data)
+        self.assertIn(b"/transcription/api/source/browser/tonevision/takeover/", response.data)
         self.assertIn(b"debug-line", response.data)
         self.assertIn(b"isSecureContext", response.data)
         self.assertIn(b"Open this page in Safari", response.data)
@@ -820,6 +827,40 @@ class TranscriptionTests(unittest.TestCase):
         self.assertEqual(started.status_code, 200)
         self.assertEqual(laptop_ingest.status_code, 409)
         self.assertEqual(laptop_ingest.get_json()["active_host_slug"], "iphone15pro")
+
+    def test_browser_capture_marker_inserts_transcript_segment(self):
+        response = self.client.post(
+            "/api/source/browser/marker/iphone15pro?token=iphone-token",
+            json={"text": "song"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["text"], "[Song]")
+        self.assertGreater(payload["segment_id"], 0)
+        with sqlite3.connect(self.db_path) as connection:
+            row = connection.execute(
+                """
+                SELECT room_slug, host_slug, provider, model, text, source
+                FROM transcript_segments
+                WHERE id = ?
+                """,
+                (payload["segment_id"],),
+            ).fetchone()
+        self.assertEqual(row, ("convention-laptop", "iphone15pro", "browser_capture", "marker", "[Song]", "manual_marker"))
+
+    def test_browser_capture_marker_rejects_bad_token_and_text(self):
+        bad_token = self.client.post(
+            "/api/source/browser/marker/iphone15pro?token=wrong",
+            json={"text": "[Song]"},
+        )
+        bad_marker = self.client.post(
+            "/api/source/browser/marker/iphone15pro?token=iphone-token",
+            json={"text": "[Random]"},
+        )
+
+        self.assertEqual(bad_token.status_code, 403)
+        self.assertEqual(bad_marker.status_code, 400)
 
     def test_settings_collapses_multiple_hosts_per_room(self):
         with sqlite3.connect(self.db_path) as connection:

@@ -199,6 +199,12 @@ BROWSER_CAPTURE_TEMPLATE = """
       grid-template-columns: 1fr 1fr;
       gap: 12px;
     }
+    .quick-actions {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-top: 12px;
+    }
     button {
       min-height: 64px;
       border: 1px solid rgba(119, 180, 224, 0.42);
@@ -219,6 +225,15 @@ BROWSER_CAPTURE_TEMPLATE = """
       border-color: rgba(255, 154, 154, 0.50);
       background: rgba(88, 41, 51, 0.72);
       color: var(--bad);
+    }
+    button.marker {
+      font-size: 20px;
+      background: rgba(17, 37, 58, 0.78);
+    }
+    button.muted {
+      border-color: rgba(255, 192, 111, 0.58);
+      background: rgba(89, 68, 42, 0.78);
+      color: var(--warn);
     }
     button:disabled {
       cursor: not-allowed;
@@ -252,7 +267,7 @@ BROWSER_CAPTURE_TEMPLATE = """
     }
     @media (max-width: 560px) {
       main { width: min(100vw - 22px, 680px); }
-      .status-row, .actions { grid-template-columns: 1fr; }
+      .status-row, .actions, .quick-actions { grid-template-columns: 1fr; }
       .status-row { align-items: stretch; flex-direction: column; }
       .pill { justify-content: center; }
       .metrics { grid-template-columns: 1fr; }
@@ -288,6 +303,12 @@ BROWSER_CAPTURE_TEMPLATE = """
         <button class="primary" id="start-button" type="button" onclick="startCapture()">Start Capture</button>
         <button class="danger" id="stop-button" type="button" onclick="stopCapture(true)" disabled>Stop Capture</button>
       </div>
+      <div class="quick-actions">
+        <button class="marker" id="mute-button" type="button" onclick="toggleMute()" disabled>Mute Mic</button>
+        <button class="marker" type="button" data-marker-text="[Song]">[Song]</button>
+        <button class="marker" type="button" data-marker-text="[Prophecy]">[Prophecy]</button>
+        <button class="marker" id="tonevision-button" type="button" onclick="takeToneVision()">Take ToneVision</button>
+      </div>
       <div class="message" id="message"></div>
       <div class="debug" id="debug-box" aria-live="polite">
         <strong>Debug</strong>
@@ -301,8 +322,12 @@ BROWSER_CAPTURE_TEMPLATE = """
     const startUrl = `/transcription/api/source/browser/start/${encodeURIComponent(hostSlug)}?token=${encodeURIComponent(token)}`;
     const chunkUrl = `/transcription/api/source/browser/chunk/${encodeURIComponent(hostSlug)}?token=${encodeURIComponent(token)}`;
     const stopUrl = `/transcription/api/source/browser/stop/${encodeURIComponent(hostSlug)}?token=${encodeURIComponent(token)}`;
+    const markerUrl = `/transcription/api/source/browser/marker/${encodeURIComponent(hostSlug)}?token=${encodeURIComponent(token)}`;
+    const tonevisionTakeoverUrl = `/transcription/api/source/browser/tonevision/takeover/${encodeURIComponent(hostSlug)}?token=${encodeURIComponent(token)}`;
     const startButton = document.getElementById("start-button");
     const stopButton = document.getElementById("stop-button");
+    const muteButton = document.getElementById("mute-button");
+    const tonevisionButton = document.getElementById("tonevision-button");
     const statePill = document.getElementById("state-pill");
     const levelBar = document.getElementById("level-bar");
     const sampleRateValue = document.getElementById("sample-rate");
@@ -322,6 +347,7 @@ BROWSER_CAPTURE_TEMPLATE = """
     let sampleBuffer = [];
     let bufferedSamples = 0;
     let startInProgress = false;
+    let captureMuted = false;
 
     function debug(text) {
       if (debugLine) debugLine.textContent = text || "";
@@ -335,6 +361,18 @@ BROWSER_CAPTURE_TEMPLATE = """
 
     function setMessage(text) {
       message.textContent = text || "";
+    }
+
+    function updateMuteUi() {
+      muteButton.disabled = !captureActive;
+      muteButton.textContent = captureMuted ? "Unmute Mic" : "Mute Mic";
+      muteButton.classList.toggle("muted", captureMuted);
+      if (captureActive && captureMuted) {
+        setState("Muted", "warn");
+        setMessage("Mic is muted. iPhone still owns Room C and is sending silence.");
+      } else if (captureActive) {
+        setState("Live", "good");
+      }
     }
 
     function ensureCaptureSupported() {
@@ -404,7 +442,7 @@ BROWSER_CAPTURE_TEMPLATE = """
     function queueSamples(input) {
       if (!captureActive || !input || !input.length) return;
       const copy = new Float32Array(input.length);
-      copy.set(input);
+      if (!captureMuted) copy.set(input);
       sampleBuffer.push(copy);
       bufferedSamples += copy.length;
       const targetSamples = Math.max(2048, Math.floor(sampleRate * 0.25));
@@ -413,6 +451,60 @@ BROWSER_CAPTURE_TEMPLATE = """
         if (pendingChunks.length > 12) pendingChunks.splice(0, pendingChunks.length - 12);
         queuedValue.textContent = String(pendingChunks.length);
         drainChunks();
+      }
+    }
+
+    async function toggleMute() {
+      if (!captureActive) return;
+      captureMuted = !captureMuted;
+      if (captureMuted) {
+        sampleBuffer = [];
+        bufferedSamples = 0;
+        levelBar.style.width = "0%";
+        debug("Mic muted; uploading silence to hold Room C.");
+      } else {
+        debug("Mic unmuted.");
+      }
+      updateMuteUi();
+    }
+
+    async function insertMarker(text) {
+      if (!token) {
+        setState("Token Needed", "warn");
+        setMessage("Open the paired capture link from transcription settings.");
+        return;
+      }
+      const markerText = String(text || "").trim();
+      if (!markerText) return;
+      try {
+        const payload = await postJson(markerUrl, {text: markerText});
+        setMessage(`${markerText} inserted.`);
+        debug(`Inserted marker ${markerText}; segment=${payload.segment_id || ""}`);
+      } catch (error) {
+        setState("Error", "bad");
+        setMessage(error.message || "Marker insert failed.");
+        debug(`Marker failed: ${error.message || error}`);
+      }
+    }
+
+    async function takeToneVision() {
+      if (!token) {
+        setState("Token Needed", "warn");
+        setMessage("Open the paired capture link from transcription settings.");
+        return;
+      }
+      tonevisionButton.disabled = true;
+      setMessage("Taking ToneVision transmitter...");
+      try {
+        const payload = await postJson(tonevisionTakeoverUrl, {});
+        setMessage(`TrueNAS is now transmitter for ${payload.tonevision_room || "ToneVision"}.`);
+        debug(`ToneVision takeover started; room=${payload.tonevision_room || ""}`);
+      } catch (error) {
+        setState("Error", "bad");
+        setMessage(error.message || "ToneVision takeover failed.");
+        debug(`ToneVision takeover failed: ${error.message || error}`);
+      } finally {
+        tonevisionButton.disabled = false;
       }
     }
 
@@ -505,6 +597,8 @@ BROWSER_CAPTURE_TEMPLATE = """
         setMessage("iPhone microphone is feeding Room C. Keep this page open and unlocked.");
         debug("Live. Audio chunks should begin uploading as the level moves.");
         stopButton.disabled = false;
+        captureMuted = false;
+        updateMuteUi();
       } catch (error) {
         setState("Error", "bad");
         setMessage(error.message || "Microphone start failed.");
@@ -519,8 +613,10 @@ BROWSER_CAPTURE_TEMPLATE = """
     async function stopCapture(notifyServer = true) {
       const wasActive = captureActive;
       captureActive = false;
+      captureMuted = false;
       startButton.disabled = false;
       stopButton.disabled = true;
+      updateMuteUi();
       if (processor) {
         processor.disconnect();
         processor.onaudioprocess = null;
@@ -548,8 +644,15 @@ BROWSER_CAPTURE_TEMPLATE = """
 
     window.startCapture = startCapture;
     window.stopCapture = stopCapture;
+    window.toggleMute = toggleMute;
+    window.insertMarker = insertMarker;
+    window.takeToneVision = takeToneVision;
     startButton.addEventListener("click", startCapture);
     stopButton.addEventListener("click", () => stopCapture(true));
+    document.querySelectorAll("[data-marker-text]").forEach((button) => {
+      button.addEventListener("click", () => insertMarker(button.getAttribute("data-marker-text") || ""));
+    });
+    updateMuteUi();
     debug(`Ready. secure=${window.isSecureContext ? "yes" : "no"} media=${navigator.mediaDevices && navigator.mediaDevices.getUserMedia ? "yes" : "no"} audio=${window.AudioContext || window.webkitAudioContext ? "yes" : "no"}`);
     window.addEventListener("pagehide", () => {
       if (captureActive) navigator.sendBeacon(stopUrl, new Blob(["{}"], {type: "application/json"}));
@@ -957,6 +1060,15 @@ def install_source_api(app, transcription_store) -> None:
     transcription_lock = threading.Lock()
     browser_capture_states: dict[str, dict] = {}
     browser_capture_lock = threading.Lock()
+    tonevision_bridge_lock = threading.Lock()
+    tonevision_bridge_state: dict[str, object] = {
+        "thread": None,
+        "stop_event": None,
+        "started_at": "",
+        "last_error": "",
+        "tonevision_room": "",
+        "ntc_room": "",
+    }
 
     def source_base_url() -> str:
         configured = (app.config.get("NTC_TRANSCRIPTION_SOURCE_PUBLIC_BASE_URL") or "").strip().rstrip("/")
@@ -995,6 +1107,96 @@ def install_source_api(app, transcription_store) -> None:
         if _config_enabled(app, "NTC_TRANSCRIPTION_HARD_DISABLED"):
             return False
         return bool(host.get("transcription_desired_active") and provider_ready(provider()))
+
+    def start_tonevision_takeover(host: dict) -> dict:
+        try:
+            from tools.tonevision_bridge import ToneVisionWebSocket, tonevision_ws_url, trim_buffer
+        except ImportError as exc:  # pragma: no cover - deployment packaging guard
+            raise RuntimeError("ToneVision bridge tool is not available in this deployment") from exc
+
+        tonevision_base_url = (
+            app.config.get("NTC_TONEVISION_BASE_URL")
+            or os.getenv("NTC_TONEVISION_BASE_URL")
+            or "http://100.96.175.75:8080"
+        ).strip()
+        tonevision_room = (
+            app.config.get("NTC_TONEVISION_ROOM")
+            or os.getenv("NTC_TONEVISION_ROOM")
+            or "english"
+        ).strip()
+        tonevision_pin = (
+            app.config.get("NTC_TONEVISION_PIN")
+            or os.getenv("NTC_TONEVISION_PIN")
+            or "1234"
+        ).strip()
+        if not tonevision_pin:
+            raise RuntimeError("ToneVision PIN is not configured")
+        poll_seconds = max(0.2, float(app.config.get("NTC_TONEVISION_POLL_SECONDS", os.getenv("NTC_TONEVISION_POLL_SECONDS", "0.7"))))
+        max_chars = max(1000, int(app.config.get("NTC_TONEVISION_MAX_CHARS", os.getenv("NTC_TONEVISION_MAX_CHARS", "60000"))))
+        timeout_seconds = max(2.0, float(app.config.get("NTC_TONEVISION_TIMEOUT_SECONDS", os.getenv("NTC_TONEVISION_TIMEOUT_SECONDS", "10.0"))))
+        room_slug = host["room_slug"]
+
+        with tonevision_bridge_lock:
+            previous_stop = tonevision_bridge_state.get("stop_event")
+            if isinstance(previous_stop, threading.Event):
+                previous_stop.set()
+            stop_event = threading.Event()
+            tonevision_bridge_state.update(
+                {
+                    "thread": None,
+                    "stop_event": stop_event,
+                    "started_at": _utc_now(),
+                    "last_error": "",
+                    "tonevision_room": tonevision_room,
+                    "ntc_room": room_slug,
+                }
+            )
+
+        def bridge_worker() -> None:
+            ws = None
+            last_id = 0
+            buffer_parts: list[str] = []
+            try:
+                initial = transcription_store.list_segments_after(room_slug, after_id=0, limit=500)
+                last_id = max((int(segment.get("id") or 0) for segment in initial), default=0)
+                ws = ToneVisionWebSocket(
+                    tonevision_ws_url(tonevision_base_url, tonevision_room, tonevision_pin),
+                    timeout=timeout_seconds,
+                )
+                ws.connect()
+                ws.send_json({"type": "pause", "paused": False})
+                app.logger.info("ToneVision takeover connected room=%s ntc_room=%s after_id=%s", tonevision_room, room_slug, last_id)
+                while not stop_event.wait(poll_seconds):
+                    segments = transcription_store.list_segments_after(room_slug, after_id=last_id, limit=80)
+                    if not segments:
+                        continue
+                    for segment in segments:
+                        segment_id = int(segment.get("id") or 0)
+                        text = " ".join(str(segment.get("text") or "").split())
+                        if segment_id > 0:
+                            last_id = max(last_id, segment_id)
+                        if text:
+                            buffer_parts.append(text)
+                    if buffer_parts:
+                        ws.send_json({"type": "text", "text": trim_buffer(buffer_parts, max_chars)})
+            except Exception as exc:
+                with tonevision_bridge_lock:
+                    tonevision_bridge_state["last_error"] = str(exc)
+                app.logger.warning("ToneVision takeover bridge failed room=%s error=%s", tonevision_room, exc)
+            finally:
+                if ws:
+                    ws.close()
+
+        thread = threading.Thread(target=bridge_worker, daemon=True, name=f"ntc-tonevision-{tonevision_room}")
+        with tonevision_bridge_lock:
+            tonevision_bridge_state["thread"] = thread
+        thread.start()
+        return {
+            "tonevision_base_url": tonevision_base_url,
+            "tonevision_room": tonevision_room,
+            "ntc_room": room_slug,
+            "started_at": tonevision_bridge_state["started_at"],
+        }
 
     def stream_descriptor(snapshot: dict | None = None):
         runtime = (snapshot or {}).get("runtime") or {}
@@ -1533,6 +1735,56 @@ def install_source_api(app, transcription_store) -> None:
             return jsonify({"error": "unauthorized"}), 403
         stop_browser_capture(host["slug"])
         return jsonify({"ok": True})
+
+    @app.post("/transcription/api/source/browser/marker/<host_slug>")
+    @app.post("/api/source/browser/marker/<host_slug>")
+    def transcription_browser_capture_marker(host_slug: str):
+        host = auth_host_from_request(host_slug)
+        if not host:
+            return jsonify({"error": "unauthorized"}), 403
+        payload = request.get_json(silent=True) or {}
+        raw_text = str(payload.get("text") or "").strip()
+        allowed_markers = {"[Song]", "[Prophecy]"}
+        marker_text = {
+            "song": "[Song]",
+            "[song]": "[Song]",
+            "prophecy": "[Prophecy]",
+            "[prophecy]": "[Prophecy]",
+        }.get(raw_text.casefold(), raw_text)
+        if marker_text not in allowed_markers:
+            return jsonify({"error": "unsupported marker"}), 400
+        now = _utc_now()
+        segment_id = transcription_store.record_transcript_segment(
+            host["room_slug"],
+            host_slug=host["slug"],
+            provider="browser_capture",
+            model="marker",
+            started_at=now,
+            ended_at=now,
+            received_at=now,
+            text=marker_text,
+            source="manual_marker",
+        )
+        transcription_store.record_source_event(
+            host["slug"],
+            event_type="browser-marker-inserted",
+            level="info",
+            message=f"Inserted transcript marker {marker_text}.",
+            details={"segment_id": segment_id, "marker": marker_text},
+        )
+        return jsonify({"ok": True, "segment_id": segment_id, "text": marker_text})
+
+    @app.post("/transcription/api/source/browser/tonevision/takeover/<host_slug>")
+    @app.post("/api/source/browser/tonevision/takeover/<host_slug>")
+    def transcription_browser_capture_tonevision_takeover(host_slug: str):
+        host = auth_host_from_request(host_slug)
+        if not host:
+            return jsonify({"error": "unauthorized"}), 403
+        try:
+            takeover = start_tonevision_takeover(host)
+        except RuntimeError as exc:
+            return jsonify({"error": str(exc)}), 500
+        return jsonify({"ok": True, **takeover})
 
     @app.post("/transcription/api/source/ingest/<host_slug>")
     @app.post("/api/source/ingest/<host_slug>")
