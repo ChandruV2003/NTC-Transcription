@@ -759,6 +759,9 @@ class TranscriptionTests(unittest.TestCase):
         self.assertIn(b"debug-line", response.data)
         self.assertIn(b"isSecureContext", response.data)
         self.assertIn(b"Open this page in Safari", response.data)
+        self.assertIn(b'const hostSlug = "iphone15pro";', response.data)
+        self.assertIn(b'const token = "iphone-token";', response.data)
+        self.assertNotIn(b"&#34;iphone15pro&#34;", response.data)
 
     def test_browser_capture_start_rejects_bad_token(self):
         response = self.client.post(

@@ -296,8 +296,8 @@ BROWSER_CAPTURE_TEMPLATE = """
     </section>
   </main>
   <script>
-    const hostSlug = {{ host_slug_json }};
-    const token = {{ token_json }};
+    const hostSlug = {{ host_slug_json | safe }};
+    const token = {{ token_json | safe }};
     const startUrl = `/transcription/api/source/browser/start/${encodeURIComponent(hostSlug)}?token=${encodeURIComponent(token)}`;
     const chunkUrl = `/transcription/api/source/browser/chunk/${encodeURIComponent(hostSlug)}?token=${encodeURIComponent(token)}`;
     const stopUrl = `/transcription/api/source/browser/stop/${encodeURIComponent(hostSlug)}?token=${encodeURIComponent(token)}`;
