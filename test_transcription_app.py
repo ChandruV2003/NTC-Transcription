@@ -878,6 +878,26 @@ class TranscriptionTests(unittest.TestCase):
         self.assertIn(b"block.classList.add(\"is-marker\")", response.data)
         self.assertIn(b"[Announcements]", response.data)
 
+    def test_marker_segments_feed_public_api_and_tonevision_lines(self):
+        from tools import tonevision_bridge
+
+        self.app.config["NTC_TRANSCRIPTION_VISIBLE_ROOMS"] = "room-a,room-b,convention-laptop"
+        before_id = _insert_segment(self.db_path, "convention-laptop", "Before marker", received_at="2026-05-24T20:00:00+00:00")
+        marker_id = _insert_segment(self.db_path, "convention-laptop", "[Announcements]", received_at="2026-05-24T20:00:01+00:00")
+        after_id = _insert_segment(self.db_path, "convention-laptop", "After marker", received_at="2026-05-24T20:00:02+00:00")
+
+        response = self.client.get(f"/api/public/transcription/convention-laptop/segments?after_id={before_id - 1}")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        texts = [segment["text"] for segment in payload["segments"]]
+        ids = [segment["id"] for segment in payload["segments"]]
+        self.assertEqual(ids[-3:], [before_id, marker_id, after_id])
+        self.assertEqual(texts[-3:], ["Before marker", "[Announcements]", "After marker"])
+
+        tonevision_text = tonevision_bridge.trim_buffer(texts[-3:], 60000)
+        self.assertEqual(tonevision_text, "Before marker\n[Announcements]\nAfter marker")
+
     def test_settings_collapses_multiple_hosts_per_room(self):
         with sqlite3.connect(self.db_path) as connection:
             connection.execute("UPDATE rooms SET transcription_enabled = 1 WHERE slug = 'room-a'")
