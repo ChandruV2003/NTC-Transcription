@@ -235,7 +235,7 @@ class TranscriptionTests(unittest.TestCase):
         self.app.config["NTC_TRANSCRIPTION_VISIBLE_ROOMS"] = "room-a,room-b,convention-laptop"
         _insert_segment(self.db_path, "convention-laptop", "Convention transcription line.")
 
-        response = self.client.get("/transcription/convention-laptop")
+        response = self.client.get("/transcription/convention")
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Convention transcription line.", response.data)
