@@ -235,7 +235,7 @@ class TranscriptionTests(unittest.TestCase):
         self.app.config["NTC_TRANSCRIPTION_VISIBLE_ROOMS"] = "room-a,room-b,convention-laptop"
         _insert_segment(self.db_path, "convention-laptop", "Convention transcription line.")
 
-        response = self.client.get("/transcription/convention")
+        response = self.client.get("/transcription/convention-laptop")
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Convention transcription line.", response.data)
@@ -760,6 +760,9 @@ class TranscriptionTests(unittest.TestCase):
         self.assertIn(b"Mute Mic", response.data)
         self.assertIn(b"[Song]", response.data)
         self.assertIn(b"[Prophecy]", response.data)
+        self.assertIn(b"[Announcements]", response.data)
+        self.assertIn(b"Custom Marker", response.data)
+        self.assertIn(b"insertCustomMarker", response.data)
         self.assertIn(b"Take ToneVision", response.data)
         self.assertIn(b"/transcription/api/source/browser/marker/", response.data)
         self.assertIn(b"/transcription/api/source/browser/tonevision/takeover/", response.data)
@@ -831,12 +834,12 @@ class TranscriptionTests(unittest.TestCase):
     def test_browser_capture_marker_inserts_transcript_segment(self):
         response = self.client.post(
             "/api/source/browser/marker/iphone15pro?token=iphone-token",
-            json={"text": "song"},
+            json={"text": "annoucements"},
         )
 
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
-        self.assertEqual(payload["text"], "[Song]")
+        self.assertEqual(payload["text"], "[Announcements]")
         self.assertGreater(payload["segment_id"], 0)
         with sqlite3.connect(self.db_path) as connection:
             row = connection.execute(
@@ -847,7 +850,7 @@ class TranscriptionTests(unittest.TestCase):
                 """,
                 (payload["segment_id"],),
             ).fetchone()
-        self.assertEqual(row, ("convention-laptop", "iphone15pro", "browser_capture", "marker", "[Song]", "manual_marker"))
+        self.assertEqual(row, ("convention-laptop", "iphone15pro", "browser_capture", "marker", "[Announcements]", "manual_marker"))
 
     def test_browser_capture_marker_rejects_bad_token_and_text(self):
         bad_token = self.client.post(
@@ -856,11 +859,24 @@ class TranscriptionTests(unittest.TestCase):
         )
         bad_marker = self.client.post(
             "/api/source/browser/marker/iphone15pro?token=iphone-token",
-            json={"text": "[Random]"},
+            json={"text": "[]"},
         )
 
         self.assertEqual(bad_token.status_code, 403)
         self.assertEqual(bad_marker.status_code, 400)
+
+    def test_public_display_treats_bracket_markers_as_separate_blocks(self):
+        self.app.config["NTC_TRANSCRIPTION_VISIBLE_ROOMS"] = "room-a,room-b,convention-laptop"
+        _insert_segment(self.db_path, "convention-laptop", "Before marker", received_at="2026-05-24T20:00:00+00:00")
+        _insert_segment(self.db_path, "convention-laptop", "[Announcements]", received_at="2026-05-24T20:00:01+00:00")
+        _insert_segment(self.db_path, "convention-laptop", "After marker", received_at="2026-05-24T20:00:02+00:00")
+
+        response = self.client.get("/transcription/convention-laptop")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"function isMarkerText", response.data)
+        self.assertIn(b"block.classList.add(\"is-marker\")", response.data)
+        self.assertIn(b"[Announcements]", response.data)
 
     def test_settings_collapses_multiple_hosts_per_room(self):
         with sqlite3.connect(self.db_path) as connection:

@@ -3549,6 +3549,9 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
         text-wrap: pretty;
       }
       .block:not(:last-child) { opacity: 0.6; }
+      .block.is-marker {
+        opacity: 0.82;
+      }
       .empty { opacity: 0.72; }
       .word {
         display: inline-block;
@@ -3620,6 +3623,10 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
           return /[.!?]["')\\]]?$/.test(text.trim());
         }
 
+        function isMarkerText(text) {
+          return /^\\[[^\\[\\]\\n]{1,80}\\]$/.test(String(text || "").trim());
+        }
+
         function addSegment(segment) {
           const id = String(segment.id || "");
           const text = normalizeText(segment.text);
@@ -3627,7 +3634,7 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
           seen.add(id);
           lastId = Math.max(lastId, Number(id));
           if (!text) return false;
-          segments.push({ id, text });
+          segments.push({ id, text, marker: isMarkerText(text) });
           return true;
         }
 
@@ -3636,6 +3643,15 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
           let current = [];
           let currentLength = 0;
           for (const segment of segments) {
+            if (segment.marker) {
+              if (current.length) {
+                blocks.push(current);
+                current = [];
+                currentLength = 0;
+              }
+              blocks.push([segment]);
+              continue;
+            }
             const nextLength = currentLength + (currentLength ? 1 : 0) + segment.text.length;
             const shouldStartBlock = current.length > 0 && (
               nextLength > 620 ||
@@ -3695,6 +3711,9 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
           for (const blockSegments of blocks) {
             const block = document.createElement("p");
             block.className = "block";
+            if (blockSegments.length === 1 && blockSegments[0].marker) {
+              block.classList.add("is-marker");
+            }
             block.dataset.segmentIds = blockSegments.map((segment) => segment.id).join(",");
             renderBlockText(block, blockSegments, animatedIds);
             transcript.appendChild(block);

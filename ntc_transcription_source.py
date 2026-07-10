@@ -201,9 +201,50 @@ BROWSER_CAPTURE_TEMPLATE = """
     }
     .quick-actions {
       display: grid;
-      grid-template-columns: repeat(4, 1fr);
+      grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
       gap: 12px;
       margin-top: 12px;
+    }
+    .insert-panel {
+      display: grid;
+      gap: 10px;
+      margin-top: 12px;
+      border: 1px solid rgba(119, 180, 224, 0.26);
+      border-radius: 18px;
+      padding: 14px;
+      background: rgba(5, 13, 22, 0.46);
+    }
+    .insert-panel label {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 900;
+      letter-spacing: .13em;
+      text-transform: uppercase;
+    }
+    .insert-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(130px, auto);
+      gap: 10px;
+    }
+    input {
+      width: 100%;
+      min-height: 58px;
+      border: 1px solid rgba(119, 180, 224, 0.42);
+      border-radius: 16px;
+      background: rgba(4, 10, 18, 0.72);
+      color: var(--text);
+      font: inherit;
+      font-size: 20px;
+      font-weight: 800;
+      padding: 0 16px;
+      outline: none;
+    }
+    input:focus {
+      border-color: rgba(143, 211, 255, 0.72);
+      box-shadow: 0 0 0 3px rgba(143, 211, 255, 0.14);
+    }
+    input::placeholder {
+      color: rgba(168, 185, 203, 0.58);
     }
     button {
       min-height: 64px;
@@ -229,6 +270,11 @@ BROWSER_CAPTURE_TEMPLATE = """
     button.marker {
       font-size: 20px;
       background: rgba(17, 37, 58, 0.78);
+    }
+    button.compact {
+      min-height: 58px;
+      font-size: 20px;
+      padding: 0 18px;
     }
     button.muted {
       border-color: rgba(255, 192, 111, 0.58);
@@ -267,7 +313,7 @@ BROWSER_CAPTURE_TEMPLATE = """
     }
     @media (max-width: 560px) {
       main { width: min(100vw - 22px, 680px); }
-      .status-row, .actions, .quick-actions { grid-template-columns: 1fr; }
+      .status-row, .actions, .quick-actions, .insert-row { grid-template-columns: 1fr; }
       .status-row { align-items: stretch; flex-direction: column; }
       .pill { justify-content: center; }
       .metrics { grid-template-columns: 1fr; }
@@ -307,7 +353,15 @@ BROWSER_CAPTURE_TEMPLATE = """
         <button class="marker" id="mute-button" type="button" onclick="toggleMute()" disabled>Mute Mic</button>
         <button class="marker" type="button" data-marker-text="[Song]">[Song]</button>
         <button class="marker" type="button" data-marker-text="[Prophecy]">[Prophecy]</button>
+        <button class="marker" type="button" data-marker-text="[Announcements]">[Announcements]</button>
         <button class="marker" id="tonevision-button" type="button" onclick="takeToneVision()">Take ToneVision</button>
+      </div>
+      <div class="insert-panel">
+        <label for="custom-marker">Custom Marker</label>
+        <div class="insert-row">
+          <input id="custom-marker" type="text" inputmode="text" autocomplete="off" autocapitalize="words" placeholder="Announcements">
+          <button class="compact marker" id="custom-marker-button" type="button" onclick="insertCustomMarker()">Insert</button>
+        </div>
       </div>
       <div class="message" id="message"></div>
       <div class="debug" id="debug-box" aria-live="polite">
@@ -328,6 +382,8 @@ BROWSER_CAPTURE_TEMPLATE = """
     const stopButton = document.getElementById("stop-button");
     const muteButton = document.getElementById("mute-button");
     const tonevisionButton = document.getElementById("tonevision-button");
+    const customMarkerInput = document.getElementById("custom-marker");
+    const customMarkerButton = document.getElementById("custom-marker-button");
     const statePill = document.getElementById("state-pill");
     const levelBar = document.getElementById("level-bar");
     const sampleRateValue = document.getElementById("sample-rate");
@@ -478,13 +534,28 @@ BROWSER_CAPTURE_TEMPLATE = """
       if (!markerText) return;
       try {
         const payload = await postJson(markerUrl, {text: markerText});
-        setMessage(`${markerText} inserted.`);
-        debug(`Inserted marker ${markerText}; segment=${payload.segment_id || ""}`);
+        const insertedText = payload.text || markerText;
+        setMessage(`${insertedText} inserted.`);
+        debug(`Inserted marker ${insertedText}; segment=${payload.segment_id || ""}`);
       } catch (error) {
         setState("Error", "bad");
         setMessage(error.message || "Marker insert failed.");
         debug(`Marker failed: ${error.message || error}`);
       }
+    }
+
+    async function insertCustomMarker() {
+      const markerText = String(customMarkerInput.value || "").trim();
+      if (!markerText) {
+        customMarkerInput.focus();
+        setMessage("Enter a marker name first.");
+        return;
+      }
+      customMarkerButton.disabled = true;
+      await insertMarker(markerText);
+      customMarkerInput.value = "";
+      customMarkerButton.disabled = false;
+      customMarkerInput.focus();
     }
 
     async function takeToneVision() {
@@ -646,11 +717,18 @@ BROWSER_CAPTURE_TEMPLATE = """
     window.stopCapture = stopCapture;
     window.toggleMute = toggleMute;
     window.insertMarker = insertMarker;
+    window.insertCustomMarker = insertCustomMarker;
     window.takeToneVision = takeToneVision;
     startButton.addEventListener("click", startCapture);
     stopButton.addEventListener("click", () => stopCapture(true));
     document.querySelectorAll("[data-marker-text]").forEach((button) => {
       button.addEventListener("click", () => insertMarker(button.getAttribute("data-marker-text") || ""));
+    });
+    customMarkerInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        insertCustomMarker();
+      }
     });
     updateMuteUi();
     debug(`Ready. secure=${window.isSecureContext ? "yes" : "no"} media=${navigator.mediaDevices && navigator.mediaDevices.getUserMedia ? "yes" : "no"} audio=${window.AudioContext || window.webkitAudioContext ? "yes" : "no"}`);
@@ -673,6 +751,30 @@ def _utc_now() -> str:
 def _config_enabled(app, name: str, *, default: bool = False) -> bool:
     raw = str(app.config.get(name, "1" if default else "0")).strip().lower()
     return raw not in {"", "0", "false", "no", "off"}
+
+
+def _normalize_browser_marker_text(raw_text: str) -> str:
+    text = " ".join(str(raw_text or "").strip().split())
+    text = text.strip()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1].strip()
+    text = re.sub(r"[\[\]{}()<>]+", " ", text)
+    text = re.sub(r"[^A-Za-z0-9 &/.'_-]+", " ", text)
+    text = " ".join(text.split())
+    if not text:
+        return ""
+    canonical = {
+        "song": "Song",
+        "prophecy": "Prophecy",
+        "announcement": "Announcements",
+        "announcements": "Announcements",
+        "annoucement": "Announcements",
+        "annoucements": "Announcements",
+    }.get(text.casefold())
+    label = canonical or text[:48].strip()
+    if not label:
+        return ""
+    return f"[{label}]"
 
 
 def _extract_transcription_text(payload) -> str:
@@ -1744,14 +1846,8 @@ def install_source_api(app, transcription_store) -> None:
             return jsonify({"error": "unauthorized"}), 403
         payload = request.get_json(silent=True) or {}
         raw_text = str(payload.get("text") or "").strip()
-        allowed_markers = {"[Song]", "[Prophecy]"}
-        marker_text = {
-            "song": "[Song]",
-            "[song]": "[Song]",
-            "prophecy": "[Prophecy]",
-            "[prophecy]": "[Prophecy]",
-        }.get(raw_text.casefold(), raw_text)
-        if marker_text not in allowed_markers:
+        marker_text = _normalize_browser_marker_text(raw_text)
+        if not marker_text:
             return jsonify({"error": "unsupported marker"}), 400
         now = _utc_now()
         segment_id = transcription_store.record_transcript_segment(
