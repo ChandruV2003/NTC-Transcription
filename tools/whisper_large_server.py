@@ -69,7 +69,9 @@ class WhisperLargeTranscriber:
         self.model_id = model_id
         self.device = device
         self.max_new_tokens = max_new_tokens
-        self.dtype = torch.float16 if device == "mps" else torch.float32
+        # Keep MPS on float32. float16 is faster but produced unstable Whisper
+        # decoding on this Mac mini with large-v3.
+        self.dtype = torch.float32
         started_at = time.monotonic()
         self.processor = AutoProcessor.from_pretrained(model_id)
         self.model = AutoModelForSpeechSeq2Seq.from_pretrained(

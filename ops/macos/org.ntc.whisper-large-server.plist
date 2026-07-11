@@ -16,7 +16,7 @@
     <string>--model</string>
     <string>openai/whisper-large-v3</string>
     <string>--device</string>
-    <string>cpu</string>
+    <string>mps</string>
     <string>--quiet</string>
   </array>
   <key>WorkingDirectory</key>
