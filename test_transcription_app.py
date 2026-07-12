@@ -1,5 +1,6 @@
 import sqlite3
 import tempfile
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -772,6 +773,56 @@ class TranscriptionTests(unittest.TestCase):
         self.assertIn(b'const hostSlug = "iphone15pro";', response.data)
         self.assertIn(b'const token = "iphone-token";', response.data)
         self.assertNotIn(b"&#34;iphone15pro&#34;", response.data)
+
+    def test_tonevision_takeover_clears_and_starts_after_current_transcript(self):
+        from tools import tonevision_bridge
+
+        sent_payloads = []
+
+        class FakeToneVisionWebSocket:
+            def __init__(self, url, *, timeout):
+                self.url = url
+                self.timeout = timeout
+
+            def connect(self):
+                sent_payloads.append({"type": "connect"})
+
+            def send_json(self, payload):
+                sent_payloads.append(dict(payload))
+
+            def close(self):
+                sent_payloads.append({"type": "close"})
+
+        original_ws = tonevision_bridge.ToneVisionWebSocket
+        original_url = tonevision_bridge.tonevision_ws_url
+        tonevision_bridge.ToneVisionWebSocket = FakeToneVisionWebSocket
+        tonevision_bridge.tonevision_ws_url = lambda base_url, room_id, pin: "ws://tonevision.test/ws"
+        self.app.config["NTC_TONEVISION_POLL_SECONDS"] = "0.05"
+        try:
+            _insert_segment(self.db_path, "convention-laptop", "Old transcript should not replay")
+
+            response = self.client.post("/api/source/browser/tonevision/takeover/iphone15pro?token=iphone-token", json={})
+
+            self.assertEqual(response.status_code, 200)
+            deadline = time.time() + 2
+            while time.time() < deadline and not any(payload.get("type") == "text" for payload in sent_payloads):
+                time.sleep(0.02)
+            text_payloads = [payload["text"] for payload in sent_payloads if payload.get("type") == "text"]
+            self.assertEqual(text_payloads, [""])
+
+            _insert_segment(self.db_path, "convention-laptop", "Fresh transcript should appear")
+            deadline = time.time() + 2
+            while time.time() < deadline:
+                text_payloads = [payload["text"] for payload in sent_payloads if payload.get("type") == "text"]
+                if any("Fresh transcript should appear" in text for text in text_payloads):
+                    break
+                time.sleep(0.02)
+
+            self.assertTrue(any("Fresh transcript should appear" in text for text in text_payloads))
+            self.assertFalse(any("Old transcript should not replay" in text for text in text_payloads))
+        finally:
+            tonevision_bridge.ToneVisionWebSocket = original_ws
+            tonevision_bridge.tonevision_ws_url = original_url
 
     def test_browser_capture_start_rejects_bad_token(self):
         response = self.client.post(

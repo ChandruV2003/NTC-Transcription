@@ -1259,14 +1259,15 @@ def install_source_api(app, transcription_store) -> None:
             last_id = 0
             buffer_parts: list[str] = []
             try:
-                initial = transcription_store.list_segments_after(room_slug, after_id=0, limit=500)
-                last_id = max((int(segment.get("id") or 0) for segment in initial), default=0)
+                latest = transcription_store.list_recent_segments(room_slug, limit=1)
+                last_id = max((int(segment.get("id") or 0) for segment in latest), default=0)
                 ws = ToneVisionWebSocket(
                     tonevision_ws_url(tonevision_base_url, tonevision_room, tonevision_pin),
                     timeout=timeout_seconds,
                 )
                 ws.connect()
                 ws.send_json({"type": "pause", "paused": False})
+                ws.send_json({"type": "text", "text": ""})
                 app.logger.info("ToneVision takeover connected room=%s ntc_room=%s after_id=%s", tonevision_room, room_slug, last_id)
                 while not stop_event.wait(poll_seconds):
                     segments = transcription_store.list_segments_after(room_slug, after_id=last_id, limit=80)
