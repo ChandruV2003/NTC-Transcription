@@ -2,6 +2,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -902,6 +903,75 @@ class TranscriptionTests(unittest.TestCase):
                 (payload["segment_id"],),
             ).fetchone()
         self.assertEqual(row, ("convention-laptop", "iphone15pro", "browser_capture", "marker", "[Announcements]", "manual_marker"))
+
+    def test_local_http_transcription_falls_back_to_second_url(self):
+        import ntc_transcription_source
+
+        self.app.config["NTC_TRANSCRIPTION_LOCAL_URLS"] = (
+            "http://primary-whisper.test/transcription,"
+            "http://backup-whisper.test/transcription"
+        )
+        self.app.config["NTC_TRANSCRIPTION_LOCAL_URL"] = "http://legacy-whisper.test/transcription"
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute("UPDATE rooms SET transcription_enabled = 1 WHERE slug = 'convention-laptop'")
+
+        calls = []
+
+        class FakeResponse:
+            def __init__(self, status_code, payload):
+                self.status_code = status_code
+                self._payload = payload
+                self.text = str(payload)
+
+            def json(self):
+                return self._payload
+
+        def fake_post(url, **kwargs):
+            calls.append(url)
+            if url == "http://primary-whisper.test/transcription":
+                return FakeResponse(503, {"error": "busy"})
+            return FakeResponse(200, {"text": "backup endpoint transcript"})
+
+        original_post = ntc_transcription_source.requests.post
+        ntc_transcription_source.requests.post = fake_post
+        try:
+            started = self.client.post(
+                "/api/source/browser/start/iphone15pro?token=iphone-token",
+                json={"sample_rate_hz": 16000, "current_device": "Test microphone"},
+            )
+            pcm16 = b"".join(
+                int(10000 * math.sin(2 * math.pi * 440 * sample / 16000)).to_bytes(2, "little", signed=True)
+                for sample in range(16000)
+            )
+            chunk = self.client.post(
+                "/api/source/browser/chunk/iphone15pro?token=iphone-token&sample_rate_hz=16000",
+                data=pcm16,
+                headers={"Content-Type": "application/octet-stream"},
+            )
+            stopped = self.client.post("/api/source/browser/stop/iphone15pro?token=iphone-token", json={})
+
+            self.assertEqual(started.status_code, 200)
+            self.assertEqual(chunk.status_code, 200)
+            self.assertEqual(stopped.status_code, 200)
+            self.assertEqual(
+                calls,
+                [
+                    "http://primary-whisper.test/transcription",
+                    "http://backup-whisper.test/transcription",
+                ],
+            )
+            with sqlite3.connect(self.db_path) as connection:
+                row = connection.execute(
+                    """
+                    SELECT room_slug, host_slug, provider, model, text
+                    FROM transcript_segments
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+            self.assertEqual(row, ("convention-laptop", "iphone15pro", "local_http", "local", "backup endpoint transcript"))
+        finally:
+            ntc_transcription_source.requests.post = original_post
 
     def test_browser_capture_marker_rejects_bad_token_and_text(self):
         bad_token = self.client.post(

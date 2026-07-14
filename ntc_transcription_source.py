@@ -1193,8 +1193,22 @@ def install_source_api(app, transcription_store) -> None:
             return "local"
         return "gpt-4o-mini-transcribe"
 
+    def local_urls() -> list[str]:
+        raw_urls = [
+            app.config.get("NTC_TRANSCRIPTION_LOCAL_URLS"),
+            app.config.get("NTC_TRANSCRIPTION_LOCAL_URL"),
+        ]
+        urls: list[str] = []
+        for raw in raw_urls:
+            for item in str(raw or "").replace("\n", ",").split(","):
+                url = item.strip()
+                if url and url not in urls:
+                    urls.append(url)
+        return urls
+
     def local_url() -> str:
-        return (app.config.get("NTC_TRANSCRIPTION_LOCAL_URL") or "").strip()
+        urls = local_urls()
+        return urls[0] if urls else ""
 
     def provider_ready(current_provider: str) -> bool:
         if current_provider == "local_http":
@@ -1317,8 +1331,8 @@ def install_source_api(app, transcription_store) -> None:
         return max(128, min(65536, int(needed_chunks)))
 
     def transcribe_audio_chunk_local_http(wav_bytes: bytes, *, current_model: str, prompt: str, language: str) -> str:
-        url = local_url()
-        if not url:
+        urls = local_urls()
+        if not urls:
             raise RuntimeError("local transcription URL is not configured")
         timeout_seconds = max(5.0, float(app.config.get("NTC_TRANSCRIPTION_TIMEOUT_SECONDS", 25.0)))
         params = {}
@@ -1328,19 +1342,26 @@ def install_source_api(app, transcription_store) -> None:
             params["language"] = language
         if prompt:
             params["prompt"] = prompt
-        response = requests.post(
-            url,
-            params=params,
-            data=wav_bytes,
-            headers={"Content-Type": "audio/wav"},
-            timeout=timeout_seconds,
-        )
-        if response.status_code >= 400:
-            raise RuntimeError(f"local transcription service failed: HTTP {response.status_code} {response.text[:240]}")
-        try:
-            return _extract_transcription_text(response.json())
-        except ValueError:
-            return _extract_transcription_text(response.text)
+        failures: list[str] = []
+        for url in urls:
+            try:
+                response = requests.post(
+                    url,
+                    params=params,
+                    data=wav_bytes,
+                    headers={"Content-Type": "audio/wav"},
+                    timeout=timeout_seconds,
+                )
+                if response.status_code >= 400:
+                    failures.append(f"{url}: HTTP {response.status_code} {response.text[:160]}")
+                    continue
+                try:
+                    return _extract_transcription_text(response.json())
+                except ValueError:
+                    return _extract_transcription_text(response.text)
+            except requests.RequestException as exc:
+                failures.append(f"{url}: {exc}")
+        raise RuntimeError(f"local transcription service failed for all configured URLs: {'; '.join(failures)[:500]}")
 
     def transcribe_audio_chunk_local_cmd(wav_bytes: bytes, *, current_model: str, prompt: str, language: str) -> str:
         if not _config_enabled(app, "NTC_TRANSCRIPTION_ALLOW_LOCAL_COMMAND"):
