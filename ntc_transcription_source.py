@@ -1395,8 +1395,24 @@ def install_source_api(app, transcription_store) -> None:
             raise RuntimeError(f"local transcription command failed: {error_text[:240]}")
         return _extract_transcription_text(completed.stdout)
 
-    def transcribe_audio_chunk(wav_bytes: bytes, *, current_provider: str, current_model: str) -> str:
+    def transcribe_audio_chunk(
+        wav_bytes: bytes,
+        *,
+        current_provider: str,
+        current_model: str,
+        prompt_context: str = "",
+    ) -> str:
         prompt = (app.config.get("NTC_TRANSCRIPTION_PROMPT") or "").strip()
+        if prompt_context:
+            prompt = "\n".join(
+                part
+                for part in (
+                    prompt,
+                    "Recent transcript context:",
+                    prompt_context.strip(),
+                )
+                if part
+            )
         language = (app.config.get("NTC_TRANSCRIPTION_LANGUAGE") or "").strip()
         if current_provider == "local_http":
             return transcribe_audio_chunk_local_http(wav_bytes, current_model=current_model, prompt=prompt, language=language)
@@ -1416,19 +1432,126 @@ def install_source_api(app, transcription_store) -> None:
             output_rate_hz=TRANSCRIPTION_STREAM_PROFILE["sample_rate_hz"],
             output_bits_per_sample=TRANSCRIPTION_STREAM_PROFILE["bits_per_sample"],
         )
-        target_seconds = max(3.0, float(app.config.get("NTC_TRANSCRIPTION_CHUNK_SECONDS", 3.2)))
+        two_pass_enabled = _config_enabled(app, "NTC_TRANSCRIPTION_TWO_PASS_ENABLED", default=False)
+        target_floor_seconds = 1.5 if two_pass_enabled else 3.0
+        target_seconds = max(target_floor_seconds, float(app.config.get("NTC_TRANSCRIPTION_CHUNK_SECONDS", 3.2)))
         min_chunk_seconds = max(1.0, float(app.config.get("NTC_TRANSCRIPTION_MIN_CHUNK_SECONDS", 1.8)))
         max_chunk_seconds = max(target_seconds, float(app.config.get("NTC_TRANSCRIPTION_MAX_CHUNK_SECONDS", 6.0)))
         overlap_seconds = max(0.0, float(app.config.get("NTC_TRANSCRIPTION_CHUNK_OVERLAP_SECONDS", 0.75)))
         overlap_seconds = min(overlap_seconds, max(0.0, min_chunk_seconds - 0.5), target_seconds / 2.0)
         vad_enabled = _config_enabled(app, "NTC_TRANSCRIPTION_VAD_ENABLED", default=True)
+        refined_window_seconds = max(target_seconds, float(app.config.get("NTC_TRANSCRIPTION_REFINED_WINDOW_SECONDS", 14.0)))
+        refined_min_seconds = max(target_seconds, float(app.config.get("NTC_TRANSCRIPTION_REFINED_MIN_SECONDS", 8.0)))
+        refined_min_seconds = min(refined_min_seconds, refined_window_seconds)
+        refined_prompt_chars = max(0, int(app.config.get("NTC_TRANSCRIPTION_REFINED_PROMPT_CHARS", 320)))
+        refined_queue_size = max(1, int(app.config.get("NTC_TRANSCRIPTION_REFINED_QUEUE_SIZE", 2)))
         bytes_per_second = TRANSCRIPTION_STREAM_PROFILE["sample_rate_hz"] * 2
         flush_floor_seconds = min(2.0, max(1.0, min_chunk_seconds))
         pcm_buffer = bytearray()
+        refined_buffer = bytearray()
         chunk_started_at = datetime.now(timezone.utc)
+        refined_started_at: datetime | None = None
         previous_transcript_text = ""
+        refined_stop = object()
+        refined_jobs: queue.Queue = queue.Queue(maxsize=refined_queue_size)
+        refined_thread: threading.Thread | None = None
         listener_id, listener = stream_hub.open_listener(state.room_slug, maxsize=listener_maxsize(snapshot))
         state.listener_id = listener_id
+
+        def refined_worker():
+            previous_refined_text = ""
+            while True:
+                job = refined_jobs.get()
+                try:
+                    if job is refined_stop:
+                        return
+                    payload, segment_started_at, segment_ended_at = job
+                    context = previous_refined_text[-refined_prompt_chars:] if refined_prompt_chars else ""
+                    text = transcribe_audio_chunk(
+                        _wav_file_bytes(
+                            channels=TRANSCRIPTION_STREAM_PROFILE["channels"],
+                            sample_rate_hz=TRANSCRIPTION_STREAM_PROFILE["sample_rate_hz"],
+                            bits_per_sample=TRANSCRIPTION_STREAM_PROFILE["bits_per_sample"],
+                            payload=payload,
+                        ),
+                        current_provider=current_provider,
+                        current_model=current_model,
+                        prompt_context=context,
+                    )
+                    suppress_pattern = (app.config.get("NTC_TRANSCRIPTION_SUPPRESS_REGEX") or "").strip()
+                    if not text or _transcription_matches_suppressed_pattern(text, suppress_pattern):
+                        continue
+                    text = _trim_overlapped_transcript_prefix(previous_refined_text, text)
+                    if not text or _transcription_matches_suppressed_pattern(text, suppress_pattern):
+                        continue
+                    segment_id = transcription_store.record_transcript_segment(
+                        state.room_slug,
+                        host_slug=state.host_slug,
+                        provider=current_provider,
+                        model=current_model,
+                        started_at=segment_started_at.isoformat(),
+                        ended_at=segment_ended_at.isoformat(),
+                        received_at=_utc_now(),
+                        text=text,
+                        is_final=True,
+                        source="transcriber_refined",
+                    )
+                    if segment_id:
+                        previous_refined_text = text
+                except Exception as exc:
+                    app.logger.warning("refined transcription pass failed room_slug=%s error=%s", state.room_slug, exc)
+                finally:
+                    refined_jobs.task_done()
+
+        def ensure_refined_worker():
+            nonlocal refined_thread
+            if not two_pass_enabled:
+                return
+            if refined_thread and refined_thread.is_alive():
+                return
+            refined_thread = threading.Thread(
+                target=refined_worker,
+                name=f"ntc-transcription-refined-{state.room_slug}",
+                daemon=True,
+            )
+            refined_thread.start()
+
+        def queue_refined_payload(payload: bytes, segment_started_at: datetime, segment_ended_at: datetime):
+            if not two_pass_enabled or not payload:
+                return
+            ensure_refined_worker()
+            try:
+                refined_jobs.put_nowait((payload, segment_started_at, segment_ended_at))
+            except queue.Full:
+                app.logger.warning("dropping refined transcription job room_slug=%s reason=queue-full", state.room_slug)
+
+        def flush_refined_buffer(*, force: bool = False):
+            nonlocal refined_buffer, refined_started_at
+            if not two_pass_enabled or not refined_buffer or refined_started_at is None:
+                return
+            duration_seconds = len(refined_buffer) / float(bytes_per_second)
+            if duration_seconds < refined_min_seconds:
+                if force:
+                    refined_buffer = bytearray()
+                    refined_started_at = None
+                return
+            if not force and duration_seconds < refined_window_seconds:
+                return
+            payload = bytes(refined_buffer)
+            segment_started_at = refined_started_at
+            segment_ended_at = segment_started_at + timedelta(seconds=duration_seconds)
+            refined_buffer = bytearray()
+            refined_started_at = None
+            queue_refined_payload(payload, segment_started_at, segment_ended_at)
+
+        def add_refined_audio(payload: bytes, segment_started_at: datetime):
+            nonlocal refined_started_at
+            if not two_pass_enabled or not payload:
+                return
+            if refined_started_at is None:
+                refined_started_at = segment_started_at
+            refined_buffer.extend(payload)
+            flush_refined_buffer()
 
         def flush_buffer(*, force: bool = False):
             nonlocal chunk_started_at, previous_transcript_text
@@ -1501,6 +1624,9 @@ def install_source_api(app, transcription_store) -> None:
             )
             if segment_id:
                 previous_transcript_text = text
+                refined_payload = payload[: len(payload) - overlap_bytes] if overlap_bytes else payload
+                if refined_payload:
+                    add_refined_audio(refined_payload, segment_started_at)
 
         try:
             while not state.stop_event.is_set():
@@ -1523,10 +1649,16 @@ def install_source_api(app, transcription_store) -> None:
                 flush_buffer(force=True)
                 if len(pcm_buffer) == before_bytes:
                     break
+            flush_refined_buffer(force=True)
         except Exception as exc:
             state.last_error = str(exc)
             app.logger.warning("transcription source worker failed room_slug=%s error=%s", state.room_slug, exc)
         finally:
+            if two_pass_enabled:
+                try:
+                    refined_jobs.put_nowait(refined_stop)
+                except queue.Full:
+                    pass
             stream_hub.close_listener(state.room_slug, listener_id)
 
     def start_room_transcription(room_slug: str, host_slug: str, snapshot: dict):

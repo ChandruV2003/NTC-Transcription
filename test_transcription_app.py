@@ -165,14 +165,22 @@ def _create_test_db(path: Path):
         )
 
 
-def _insert_segment(path: Path, room_slug: str, text: str, received_at: str = "2026-05-24T20:00:00+00:00") -> int:
+def _insert_segment(
+    path: Path,
+    room_slug: str,
+    text: str,
+    received_at: str = "2026-05-24T20:00:00+00:00",
+    *,
+    source: str = "transcriber",
+    is_final: bool = True,
+) -> int:
     with sqlite3.connect(path) as connection:
         cursor = connection.execute(
             """
-            INSERT INTO transcript_segments (room_slug, received_at, text, is_final)
-            VALUES (?, ?, ?, 1)
+            INSERT INTO transcript_segments (room_slug, received_at, text, is_final, source)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (room_slug, received_at, text),
+            (room_slug, received_at, text, 1 if is_final else 0, source),
         )
         return int(cursor.lastrowid)
 
@@ -232,6 +240,22 @@ class TranscriptionTests(unittest.TestCase):
         self.assertNotIn(b"Live Caption Ingest", response.data)
         self.assertNotIn(b"Meeting live", response.data)
         self.assertNotIn(b"active_rooms", response.data)
+
+    def test_public_page_skips_refined_second_pass_rows(self):
+        _insert_segment(self.db_path, "room-a", "Fast visible line.", received_at="2026-05-24T20:00:00+00:00")
+        _insert_segment(
+            self.db_path,
+            "room-a",
+            "Refined archive-only line.",
+            received_at="2026-05-24T20:00:01+00:00",
+            source="transcriber_refined",
+        )
+
+        response = self.client.get("/transcription")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Fast visible line.", response.data)
+        self.assertNotIn(b"Refined archive-only line.", response.data)
 
     def test_public_convention_alias_renders_convention_room(self):
         self.app.config["NTC_TRANSCRIPTION_VISIBLE_ROOMS"] = "room-a,room-b,convention-laptop"
@@ -1102,6 +1126,25 @@ class TranscriptionTests(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(payload["room_slug"], "room-a")
         self.assertEqual([segment["text"] for segment in payload["segments"]], ["Second line."])
+
+    def test_public_api_skips_refined_second_pass_rows(self):
+        first_id = _insert_segment(self.db_path, "room-a", "First fast line.", received_at="2026-05-24T20:00:00+00:00")
+        _insert_segment(
+            self.db_path,
+            "room-a",
+            "Refined archive-only line.",
+            received_at="2026-05-24T20:00:01+00:00",
+            source="transcriber_refined",
+        )
+        _insert_segment(self.db_path, "room-a", "Second fast line.", received_at="2026-05-24T20:00:02+00:00")
+
+        response = self.client.get(f"/api/public/transcription/room-a/segments?after_id={first_id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [segment["text"] for segment in response.get_json()["segments"]],
+            ["Second fast line."],
+        )
 
     def test_internal_api_returns_segments_for_translator(self):
         first_id = _insert_segment(self.db_path, "room-a", "First internal line.")

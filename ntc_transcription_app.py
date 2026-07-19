@@ -46,6 +46,7 @@ TRANSLATION_LANGUAGE_LABELS = {item["code"]: item["label"] for item in TRANSLATI
 TRANSLATION_OUTPUT_HOST_SLUGS = {"hp-envy-16-ad0xx"}
 BRAND_BACKGROUND_FILENAME = "ntc-embossed-background.jpg"
 DEFAULT_BRAND_BACKGROUND_PATH = Path(__file__).resolve().parent / "assets" / BRAND_BACKGROUND_FILENAME
+REFINED_TRANSCRIPT_SOURCE = "transcriber_refined"
 WEEKDAY_KEYS = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
 WEEKDAY_LABELS = {
     "MON": "Monday",
@@ -378,32 +379,48 @@ class TranscriptionStore:
             connection.execute("SELECT 1 FROM transcript_segments LIMIT 1").fetchone()
         return True
 
+    def _display_source_filter(self, columns: set[str]) -> tuple[str, tuple[str, ...]]:
+        if "source" not in columns:
+            return "", ()
+        return "AND COALESCE(source, 'transcriber') <> ?", (REFINED_TRANSCRIPT_SOURCE,)
+
     def list_recent_segments(self, room_slug: str, *, limit: int = 30):
         with self._connect(readonly=True) as connection:
+            columns = self._table_columns(connection, "transcript_segments")
+            source_filter_sql, source_filter_params = self._display_source_filter(columns)
             rows = connection.execute(
-                """
+                f"""
                 SELECT id, room_slug, received_at, text, is_final
                 FROM transcript_segments
                 WHERE room_slug = ?
+                  {source_filter_sql}
                 ORDER BY received_at DESC, id DESC
                 LIMIT ?
                 """,
-                (room_slug, max(1, min(500, int(limit or 30)))),
+                (room_slug, *source_filter_params, max(1, min(500, int(limit or 30)))),
             ).fetchall()
         return [_segment_payload(row) for row in rows]
 
     def list_segments_after(self, room_slug: str, *, after_id: int = 0, limit: int = 80):
         with self._connect(readonly=True) as connection:
+            columns = self._table_columns(connection, "transcript_segments")
+            source_filter_sql, source_filter_params = self._display_source_filter(columns)
             rows = connection.execute(
-                """
+                f"""
                 SELECT id, room_slug, received_at, text, is_final
                 FROM transcript_segments
                 WHERE room_slug = ?
                   AND id > ?
+                  {source_filter_sql}
                 ORDER BY id ASC
                 LIMIT ?
                 """,
-                (room_slug, max(0, int(after_id or 0)), max(1, min(500, int(limit or 80)))),
+                (
+                    room_slug,
+                    max(0, int(after_id or 0)),
+                    *source_filter_params,
+                    max(1, min(500, int(limit or 80))),
+                ),
             ).fetchall()
         return [_segment_payload(row) for row in rows]
 
@@ -808,8 +825,10 @@ class TranscriptionStore:
             tz=timezone.utc,
         ).isoformat()
         with self._connect(readonly=True) as connection:
+            columns = self._table_columns(connection, "transcript_segments")
+            source_filter_sql, source_filter_params = self._display_source_filter(columns)
             row = connection.execute(
-                """
+                f"""
                 SELECT COUNT(*) AS segment_count,
                        COALESCE(SUM(LENGTH(text)), 0) AS character_count,
                        MIN(received_at) AS first_received_at,
@@ -817,8 +836,9 @@ class TranscriptionStore:
                 FROM transcript_segments
                 WHERE room_slug = ?
                   AND received_at >= ?
+                  {source_filter_sql}
                 """,
-                (room_slug, cutoff),
+                (room_slug, cutoff, *source_filter_params),
             ).fetchone()
         return {
             "window_minutes": max(1, int(window_minutes or 180)),
@@ -1155,8 +1175,10 @@ class TranscriptionStore:
 
     def _archive_payload(self, connection: sqlite3.Connection, kind: str, row: sqlite3.Row, *, now: str):
         ended_at = row["ended_at"] or now
+        columns = self._table_columns(connection, "transcript_segments")
+        source_filter_sql, source_filter_params = self._display_source_filter(columns)
         stats = connection.execute(
-            """
+            f"""
             SELECT COUNT(*) AS segment_count,
                    COALESCE(SUM(LENGTH(text)), 0) AS character_count,
                    MIN(received_at) AS first_received_at,
@@ -1165,8 +1187,9 @@ class TranscriptionStore:
             WHERE room_slug = ?
               AND received_at >= ?
               AND received_at <= ?
+              {source_filter_sql}
             """,
-            (row["room_slug"], row["started_at"], ended_at),
+            (row["room_slug"], row["started_at"], ended_at, *source_filter_params),
         ).fetchone()
         return {
             "kind": kind,
@@ -1194,6 +1217,7 @@ class TranscriptionStore:
         model_expr = "model" if "model" in columns else "''"
         started_expr = "started_at" if "started_at" in columns else "received_at"
         ended_expr = "ended_at" if "ended_at" in columns else "received_at"
+        source_filter_sql, source_filter_params = self._display_source_filter(columns)
         rows = connection.execute(
             f"""
             SELECT id,
@@ -1210,9 +1234,10 @@ class TranscriptionStore:
             WHERE room_slug = ?
               AND received_at >= ?
               AND received_at <= ?
+              {source_filter_sql}
             ORDER BY received_at ASC, id ASC
             """,
-            (room_slug, started_at, ended_at),
+            (room_slug, started_at, ended_at, *source_filter_params),
         ).fetchall()
         session_start = _parse_iso_datetime(started_at)
         transcripts = []
@@ -1335,7 +1360,7 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
         NTC_TRANSCRIPTION_POLL_MS=int(os.getenv("NTC_TRANSCRIPTION_POLL_MS", "1000")),
         NTC_TRANSCRIPTION_INITIAL_LINES=int(os.getenv("NTC_TRANSCRIPTION_INITIAL_LINES", "30")),
         NTC_TRANSCRIPTION_API_LINES=int(os.getenv("NTC_TRANSCRIPTION_API_LINES", "80")),
-        NTC_TRANSCRIPTION_RENDER_LINES=int(os.getenv("NTC_TRANSCRIPTION_RENDER_LINES", "18")),
+        NTC_TRANSCRIPTION_RENDER_LINES=int(os.getenv("NTC_TRANSCRIPTION_RENDER_LINES", "48")),
         NTC_TRANSCRIPTION_WORD_DELAY_MS=int(os.getenv("NTC_TRANSCRIPTION_WORD_DELAY_MS", "64")),
         NTC_TRANSCRIPTION_WORD_DELAY_CAP_MS=int(os.getenv("NTC_TRANSCRIPTION_WORD_DELAY_CAP_MS", "2400")),
         NTC_TRANSCRIPTION_SOURCE_PUBLIC_BASE_URL=os.getenv("NTC_TRANSCRIPTION_SOURCE_PUBLIC_BASE_URL", ""),
@@ -1350,6 +1375,11 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
         NTC_TRANSCRIPTION_MIN_CHUNK_SECONDS=float(os.getenv("NTC_TRANSCRIPTION_MIN_CHUNK_SECONDS", "1.8")),
         NTC_TRANSCRIPTION_MAX_CHUNK_SECONDS=float(os.getenv("NTC_TRANSCRIPTION_MAX_CHUNK_SECONDS", "6.0")),
         NTC_TRANSCRIPTION_CHUNK_OVERLAP_SECONDS=float(os.getenv("NTC_TRANSCRIPTION_CHUNK_OVERLAP_SECONDS", "0.75")),
+        NTC_TRANSCRIPTION_TWO_PASS_ENABLED=os.getenv("NTC_TRANSCRIPTION_TWO_PASS_ENABLED", "0"),
+        NTC_TRANSCRIPTION_REFINED_WINDOW_SECONDS=float(os.getenv("NTC_TRANSCRIPTION_REFINED_WINDOW_SECONDS", "14.0")),
+        NTC_TRANSCRIPTION_REFINED_MIN_SECONDS=float(os.getenv("NTC_TRANSCRIPTION_REFINED_MIN_SECONDS", "8.0")),
+        NTC_TRANSCRIPTION_REFINED_PROMPT_CHARS=int(os.getenv("NTC_TRANSCRIPTION_REFINED_PROMPT_CHARS", "320")),
+        NTC_TRANSCRIPTION_REFINED_QUEUE_SIZE=int(os.getenv("NTC_TRANSCRIPTION_REFINED_QUEUE_SIZE", "2")),
         NTC_TRANSCRIPTION_QUEUE_SECONDS=float(os.getenv("NTC_TRANSCRIPTION_QUEUE_SECONDS", "120.0")),
         NTC_TRANSCRIPTION_BROWSER_CAPTURE_STALE_SECONDS=float(os.getenv("NTC_TRANSCRIPTION_BROWSER_CAPTURE_STALE_SECONDS", "8.0")),
         NTC_TRANSCRIPTION_BROWSER_CAPTURE_MAX_CHUNK_BYTES=int(os.getenv("NTC_TRANSCRIPTION_BROWSER_CAPTURE_MAX_CHUNK_BYTES", "524288")),
@@ -3607,7 +3637,7 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
         if (!transcript) return;
         const roomSlug = transcript.dataset.roomSlug;
         const pollMs = Number(transcript.dataset.pollMs || "1000");
-        const renderBlocks = Math.max(1, Math.ceil(Number(transcript.dataset.renderLines || "18") / 3));
+        const renderBlocks = Math.max(8, Math.ceil(Number(transcript.dataset.renderLines || "48")));
         const wordDelayMs = Math.max(0, Number(transcript.dataset.wordDelayMs || "64"));
         const wordDelayCapMs = Math.max(0, Number(transcript.dataset.wordDelayCapMs || "2400"));
         const initialSegments = JSON.parse(document.getElementById("initial-segments")?.textContent || "[]");
