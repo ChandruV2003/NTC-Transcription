@@ -1,0 +1,19 @@
+[Unit]
+Description=NTC Whisper raw-WAV compatibility bridge
+After=network-online.target ntc-whisper-cpp-backend.service
+Wants=network-online.target
+Requires=ntc-whisper-cpp-backend.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/apps/NTC-Transcription
+ExecStart=/usr/bin/python3 %h/apps/NTC-Transcription/tools/whisper_cpp_bridge.py --host 0.0.0.0 --port 8766 --backend-url http://127.0.0.1:8767/inference --model ggml-large-v3 --device vulkan:1 --quiet
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=default.target

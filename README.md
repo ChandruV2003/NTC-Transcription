@@ -105,10 +105,13 @@ song-matching evidence for Multitrack and projection automation. Reviewed
 corrections can later feed prompt vocabulary, second-pass transcript repair,
 song/lyric matching, or explicit model fine-tuning.
 
-## Local Whisper Worker
+## Local Whisper Workers
 
-The M4 Mac mini can run a separate high-accuracy local Whisper endpoint for
-WebCall audio chunks:
+The Ubuntu Mac Pro whisper.cpp/Vulkan worker is the primary NTC inference host.
+The Apple Silicon M4 Max MacBook worker is retained as fallback capacity only;
+the M4 Mac mini remains dedicated to JVT workloads.
+
+The Apple Silicon fallback worker uses Transformers and MPS:
 
 ```bash
 python3 tools/whisper_large_server.py \
@@ -128,7 +131,7 @@ a versioned speech-to-text endpoint, using the same raw WAV request body.
 The bridge is designed for multiple source machines to call it at the same time.
 HTTP requests are accepted concurrently, then bounded by an in-process queue
 before model inference. The Whisper model itself runs one generation at a time
-inside the process so the M4 does not get overloaded by parallel large-v3
+inside the process so one worker does not get overloaded by parallel large-v3
 requests.
 
 Operational endpoints:
@@ -148,3 +151,27 @@ Useful hardening knobs:
 - `NTC_WHISPER_API_TOKEN` / `--api-token`: optional bearer or
   `X-NTC-Whisper-Token` auth. Leave unset for the current private Tailscale-only
   deployment; set it before exposing the endpoint more broadly.
+
+### Mac Pro whisper.cpp worker
+
+The Ubuntu Mac Pro uses a persistent Vulkan-backed whisper.cpp server on
+loopback port `8767`. `tools/whisper_cpp_bridge.py` exposes the same raw-WAV
+contract on port `8766`, so existing NTC callers only need a host-address
+change.
+
+Install the user units from `ops/linux` under
+`~/.config/systemd/user`, then enable both:
+
+```bash
+systemctl --user enable --now ntc-whisper-cpp-backend.service
+systemctl --user enable --now ntc-whisper-bridge.service
+```
+
+The backend expects the reviewed Mac Pro build and model at:
+
+- `~/benchmarks/whisper.cpp/build-macpro-vulkan/bin/whisper-server`
+- `~/benchmarks/whisper.cpp/models/ggml-large-v3.bin`
+
+The whisper.cpp server stays bound to `127.0.0.1`; only the compatibility
+bridge listens on the network. Validate `/healthz` and a representative WAV
+request before changing `NTC_TRANSCRIPTION_LOCAL_URL`.
