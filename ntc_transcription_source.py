@@ -1330,7 +1330,14 @@ def install_source_api(app, transcription_store) -> None:
         needed_chunks = math.ceil((source_bytes_per_second * queue_seconds) / float(INGEST_CHUNK_SIZE))
         return max(128, min(65536, int(needed_chunks)))
 
-    def transcribe_audio_chunk_local_http(wav_bytes: bytes, *, current_model: str, prompt: str, language: str) -> str:
+    def transcribe_audio_chunk_local_http(
+        wav_bytes: bytes,
+        *,
+        current_model: str,
+        prompt: str,
+        language: str,
+        lane: str,
+    ) -> str:
         urls = local_urls()
         if not urls:
             raise RuntimeError("local transcription URL is not configured")
@@ -1342,6 +1349,8 @@ def install_source_api(app, transcription_store) -> None:
             params["language"] = language
         if prompt:
             params["prompt"] = prompt
+        if lane:
+            params["lane"] = lane
         failures: list[str] = []
         for url in urls:
             try:
@@ -1401,6 +1410,7 @@ def install_source_api(app, transcription_store) -> None:
         current_provider: str,
         current_model: str,
         prompt_context: str = "",
+        lane: str = "live",
     ) -> str:
         prompt = (app.config.get("NTC_TRANSCRIPTION_PROMPT") or "").strip()
         if prompt_context:
@@ -1415,7 +1425,13 @@ def install_source_api(app, transcription_store) -> None:
             )
         language = (app.config.get("NTC_TRANSCRIPTION_LANGUAGE") or "").strip()
         if current_provider == "local_http":
-            return transcribe_audio_chunk_local_http(wav_bytes, current_model=current_model, prompt=prompt, language=language)
+            return transcribe_audio_chunk_local_http(
+                wav_bytes,
+                current_model=current_model,
+                prompt=prompt,
+                language=language,
+                lane=lane,
+            )
         if current_provider == "local_cmd":
             return transcribe_audio_chunk_local_cmd(wav_bytes, current_model=current_model, prompt=prompt, language=language)
         raise RuntimeError(f"{current_provider} transcription is not configured in ntc-transcription source API yet")
@@ -1477,6 +1493,7 @@ def install_source_api(app, transcription_store) -> None:
                         current_provider=current_provider,
                         current_model=current_model,
                         prompt_context=context,
+                        lane="batch",
                     )
                     suppress_pattern = (app.config.get("NTC_TRANSCRIPTION_SUPPRESS_REGEX") or "").strip()
                     if not text or _transcription_matches_suppressed_pattern(text, suppress_pattern):

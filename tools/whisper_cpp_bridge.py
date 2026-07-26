@@ -22,6 +22,10 @@ DEFAULT_MAX_BODY_MB = 96
 DEFAULT_MAX_QUEUED_REQUESTS = 8
 DEFAULT_QUEUE_TIMEOUT_SECONDS = 120.0
 DEFAULT_BACKEND_TIMEOUT_SECONDS = 180.0
+DEFAULT_BATCH_THRESHOLD_SECONDS = 30.0
+DEFAULT_MAX_BATCH_QUEUED_REQUESTS = 1
+DEFAULT_BATCH_QUEUE_TIMEOUT_SECONDS = 1.0
+DEFAULT_BATCH_BACKEND_TIMEOUT_SECONDS = 300.0
 
 
 def _json_bytes(payload: dict) -> bytes:
@@ -141,21 +145,58 @@ class WhisperBridgeServer(ThreadingHTTPServer):
         max_queued_requests: int,
         queue_timeout_seconds: float,
         api_token: str,
+        batch_client: WhisperCppClient | None = None,
+        batch_threshold_seconds: float = DEFAULT_BATCH_THRESHOLD_SECONDS,
+        max_batch_queued_requests: int = DEFAULT_MAX_BATCH_QUEUED_REQUESTS,
+        batch_queue_timeout_seconds: float = DEFAULT_BATCH_QUEUE_TIMEOUT_SECONDS,
     ):
         super().__init__(server_address, handler_cls)
         self.client = client
+        self.batch_client = batch_client
+        self.clients = {
+            "live": client,
+            "batch": batch_client or client,
+        }
+        self.batch_enabled = batch_client is not None
+        self.batch_threshold_seconds = max(0.0, float(batch_threshold_seconds))
         self.quiet = quiet
         self.max_body_bytes = max_body_bytes
         self.max_queued_requests = max(1, int(max_queued_requests))
         self.queue_timeout_seconds = max(0.0, float(queue_timeout_seconds))
+        self.max_batch_queued_requests = max(1, int(max_batch_queued_requests))
+        self.batch_queue_timeout_seconds = max(
+            0.0,
+            float(batch_queue_timeout_seconds),
+        )
         self.api_token = api_token
-        self.request_slots = threading.BoundedSemaphore(self.max_queued_requests)
+        self.lane_limits = {
+            "live": self.max_queued_requests,
+            "batch": self.max_batch_queued_requests,
+        }
+        self.lane_timeouts = {
+            "live": self.queue_timeout_seconds,
+            "batch": self.batch_queue_timeout_seconds,
+        }
+        self.request_slots = {
+            lane: threading.BoundedSemaphore(limit)
+            for lane, limit in self.lane_limits.items()
+        }
         self.stats_lock = threading.Lock()
         self.active_requests = 0
         self.accepted_requests = 0
         self.completed_requests = 0
         self.failed_requests = 0
         self.rejected_requests = 0
+        self.lane_stats = {
+            lane: {
+                "active_requests": 0,
+                "accepted_requests": 0,
+                "completed_requests": 0,
+                "failed_requests": 0,
+                "rejected_requests": 0,
+            }
+            for lane in self.lane_limits
+        }
         self.started_at = time.time()
 
     def stats(self) -> dict:
@@ -167,27 +208,78 @@ class WhisperBridgeServer(ThreadingHTTPServer):
                 "completed_requests": self.completed_requests,
                 "failed_requests": self.failed_requests,
                 "rejected_requests": self.rejected_requests,
+                "batch_threshold_seconds": self.batch_threshold_seconds,
+                "lanes": {
+                    lane: {
+                        **values,
+                        "capacity": self.lane_limits[lane],
+                        "queue_timeout_seconds": self.lane_timeouts[lane],
+                    }
+                    for lane, values in self.lane_stats.items()
+                },
             }
 
+    def select_lane(
+        self,
+        audio_seconds: float,
+        requested_lane: str = "",
+    ) -> str:
+        if self.batch_enabled and requested_lane == "batch":
+            return "batch"
+        if requested_lane == "live" and audio_seconds <= self.batch_threshold_seconds:
+            return "live"
+        if self.batch_enabled and audio_seconds > self.batch_threshold_seconds:
+            return "batch"
+        return "live"
+
+    def client_for(self, lane: str) -> WhisperCppClient:
+        return self.clients[lane]
+
+    def lane_available(self, lane: str) -> bool:
+        with self.stats_lock:
+            return (
+                self.lane_stats[lane]["active_requests"]
+                < self.lane_limits[lane]
+            )
+
     @contextlib.contextmanager
-    def request_slot(self):
+    def request_slot(self, lane: str):
         started_at = time.monotonic()
-        acquired = self.request_slots.acquire(timeout=self.queue_timeout_seconds)
+        acquired = self.request_slots[lane].acquire(
+            timeout=self.lane_timeouts[lane]
+        )
         queue_wait_seconds = time.monotonic() - started_at
         if not acquired:
             with self.stats_lock:
                 self.rejected_requests += 1
+                self.lane_stats[lane]["rejected_requests"] += 1
             yield False, queue_wait_seconds
             return
         with self.stats_lock:
             self.active_requests += 1
             self.accepted_requests += 1
+            self.lane_stats[lane]["active_requests"] += 1
+            self.lane_stats[lane]["accepted_requests"] += 1
         try:
             yield True, queue_wait_seconds
         finally:
             with self.stats_lock:
                 self.active_requests = max(0, self.active_requests - 1)
-            self.request_slots.release()
+                self.lane_stats[lane]["active_requests"] = max(
+                    0,
+                    self.lane_stats[lane]["active_requests"] - 1,
+                )
+            self.request_slots[lane].release()
+
+    def record_failure(self, lane: str) -> None:
+        with self.stats_lock:
+            self.failed_requests += 1
+            self.lane_stats[lane]["failed_requests"] += 1
+
+    def record_completion(self, lane: str) -> None:
+        with self.stats_lock:
+            self.completed_requests += 1
+            self.lane_stats[lane]["completed_requests"] += 1
 
 
 class WhisperBridgeHandler(BaseHTTPRequestHandler):
@@ -201,12 +293,22 @@ class WhisperBridgeHandler(BaseHTTPRequestHandler):
         if path == "/stats" and not self._authorized():
             self._send_json({"error": "unauthorized"}, status=401)
             return
-        backend_ready = self.server.client.ready()
-        status = 200 if backend_ready else 503
+        live_ready = self.server.client.ready()
+        batch_ready = (
+            self.server.batch_client.ready()
+            if self.server.batch_client is not None
+            else live_ready
+        )
+        ready = live_ready
+        if path == "/readyz":
+            ready = ready and self.server.lane_available("live")
+        status = 200 if ready else 503
         self._send_json(
             {
-                "ok": backend_ready,
-                "backend_ready": backend_ready,
+                "ok": ready,
+                "backend_ready": live_ready,
+                "live_backend_ready": live_ready,
+                "batch_backend_ready": batch_ready,
                 "model": self.server.client.model,
                 "device": self.server.client.device,
                 "uptime_seconds": round(time.time() - self.server.started_at, 3),
@@ -278,11 +380,15 @@ class WhisperBridgeHandler(BaseHTTPRequestHandler):
             )
             return
 
-        with self.server.request_slot() as (accepted, queue_wait_seconds):
+        requested_lane = str(query.get("lane", [""])[0]).strip().lower()
+        lane = self.server.select_lane(audio_seconds, requested_lane)
+        client = self.server.client_for(lane)
+        with self.server.request_slot(lane) as (accepted, queue_wait_seconds):
             if not accepted:
                 self._send_json(
                     {
-                        "error": "transcription queue is full",
+                        "error": f"{lane} transcription queue is full",
+                        "lane": lane,
                         "request_id": request_id,
                         "queue_wait_seconds": round(queue_wait_seconds, 3),
                     },
@@ -290,31 +396,34 @@ class WhisperBridgeHandler(BaseHTTPRequestHandler):
                 )
                 return
             try:
-                result = self.server.client.transcribe(
+                result = client.transcribe(
                     wav_bytes,
                     language=language,
                     prompt=prompt,
                 )
             except Exception as exc:
-                with self.server.stats_lock:
-                    self.server.failed_requests += 1
+                self.server.record_failure(lane)
                 self._send_json(
-                    {"error": str(exc)[:240], "request_id": request_id},
+                    {
+                        "error": str(exc)[:240],
+                        "lane": lane,
+                        "request_id": request_id,
+                    },
                     status=503,
                 )
                 return
 
-        with self.server.stats_lock:
-            self.server.completed_requests += 1
+        self.server.record_completion(lane)
         result.update(
             {
                 "audio_seconds": round(audio_seconds, 3),
                 "seconds": round(time.monotonic() - request_started_at, 3),
                 "queue_wait_seconds": round(queue_wait_seconds, 3),
+                "lane": lane,
                 "request_id": request_id,
-                "endpoint_version": "2026-07-25-whisper-cpp",
-                "model": self.server.client.model,
-                "device": self.server.client.device,
+                "endpoint_version": "2026-07-26-whisper-cpp-dual-lane",
+                "model": client.model,
+                "device": client.device,
                 "language": language,
             }
         )
@@ -343,7 +452,10 @@ class WhisperBridgeHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            return
 
 
 def main() -> int:
@@ -373,6 +485,30 @@ def main() -> int:
             os.getenv(
                 "NTC_WHISPER_BACKEND_TIMEOUT_SECONDS",
                 str(DEFAULT_BACKEND_TIMEOUT_SECONDS),
+            )
+        ),
+    )
+    parser.add_argument(
+        "--batch-backend-url",
+        default=os.getenv("NTC_WHISPER_CPP_BATCH_BACKEND_URL", ""),
+    )
+    parser.add_argument(
+        "--batch-backend-timeout-seconds",
+        type=float,
+        default=float(
+            os.getenv(
+                "NTC_WHISPER_BATCH_BACKEND_TIMEOUT_SECONDS",
+                str(DEFAULT_BATCH_BACKEND_TIMEOUT_SECONDS),
+            )
+        ),
+    )
+    parser.add_argument(
+        "--batch-threshold-seconds",
+        type=float,
+        default=float(
+            os.getenv(
+                "NTC_WHISPER_BATCH_THRESHOLD_SECONDS",
+                str(DEFAULT_BATCH_THRESHOLD_SECONDS),
             )
         ),
     )
@@ -412,6 +548,26 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--max-batch-queued-requests",
+        type=int,
+        default=int(
+            os.getenv(
+                "NTC_WHISPER_MAX_BATCH_QUEUED_REQUESTS",
+                str(DEFAULT_MAX_BATCH_QUEUED_REQUESTS),
+            )
+        ),
+    )
+    parser.add_argument(
+        "--batch-queue-timeout-seconds",
+        type=float,
+        default=float(
+            os.getenv(
+                "NTC_WHISPER_BATCH_QUEUE_TIMEOUT_SECONDS",
+                str(DEFAULT_BATCH_QUEUE_TIMEOUT_SECONDS),
+            )
+        ),
+    )
+    parser.add_argument(
         "--api-token",
         default=os.getenv("NTC_WHISPER_API_TOKEN", ""),
     )
@@ -424,6 +580,17 @@ def main() -> int:
         model=args.model,
         device=args.device,
     )
+    batch_client = None
+    if args.batch_backend_url:
+        batch_client = WhisperCppClient(
+            backend_url=args.batch_backend_url,
+            backend_timeout_seconds=max(
+                1.0,
+                args.batch_backend_timeout_seconds,
+            ),
+            model=args.model,
+            device=args.device,
+        )
     server = WhisperBridgeServer(
         (args.host, args.port),
         WhisperBridgeHandler,
@@ -433,11 +600,19 @@ def main() -> int:
         max_queued_requests=max(1, args.max_queued_requests),
         queue_timeout_seconds=max(0.0, args.queue_timeout_seconds),
         api_token=args.api_token,
+        batch_client=batch_client,
+        batch_threshold_seconds=max(0.0, args.batch_threshold_seconds),
+        max_batch_queued_requests=max(1, args.max_batch_queued_requests),
+        batch_queue_timeout_seconds=max(
+            0.0,
+            args.batch_queue_timeout_seconds,
+        ),
     )
     print(
         f"NTC Whisper.cpp bridge listening on "
         f"http://{args.host}:{args.port}/transcription "
-        f"backend={args.backend_url} model={args.model} device={args.device}",
+        f"backend={args.backend_url} batch_backend={args.batch_backend_url or 'disabled'} "
+        f"model={args.model} device={args.device}",
         flush=True,
     )
     server.serve_forever()

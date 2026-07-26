@@ -940,6 +940,7 @@ class TranscriptionTests(unittest.TestCase):
             connection.execute("UPDATE rooms SET transcription_enabled = 1 WHERE slug = 'convention-laptop'")
 
         calls = []
+        lanes = []
 
         class FakeResponse:
             def __init__(self, status_code, payload):
@@ -952,6 +953,7 @@ class TranscriptionTests(unittest.TestCase):
 
         def fake_post(url, **kwargs):
             calls.append(url)
+            lanes.append((kwargs.get("params") or {}).get("lane"))
             if url == "http://primary-whisper.test/transcription":
                 return FakeResponse(503, {"error": "busy"})
             return FakeResponse(200, {"text": "backup endpoint transcript"})
@@ -984,6 +986,7 @@ class TranscriptionTests(unittest.TestCase):
                     "http://backup-whisper.test/transcription",
                 ],
             )
+            self.assertEqual(lanes, ["live", "live"])
             with sqlite3.connect(self.db_path) as connection:
                 row = connection.execute(
                     """

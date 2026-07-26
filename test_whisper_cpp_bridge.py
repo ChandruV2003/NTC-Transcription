@@ -17,13 +17,13 @@ from tools.whisper_cpp_bridge import (
 )
 
 
-def _wav_bytes() -> bytes:
+def _wav_bytes(seconds: float = 1.0) -> bytes:
     output = io.BytesIO()
     with wave.open(output, "wb") as wav_file:
         wav_file.setnchannels(1)
         wav_file.setsampwidth(2)
         wav_file.setframerate(16000)
-        wav_file.writeframes(b"\x00\x00" * 16000)
+        wav_file.writeframes(b"\x00\x00" * round(16000 * seconds))
     return output.getvalue()
 
 
@@ -67,6 +67,12 @@ class WhisperCppBridgeTests(unittest.TestCase):
             model="ggml-large-v3",
             device="vulkan:1",
         )
+        batch_client = WhisperCppClient(
+            backend_url=f"http://127.0.0.1:{backend_port}/inference",
+            backend_timeout_seconds=2,
+            model="ggml-large-v3",
+            device="vulkan:1",
+        )
         self.bridge = WhisperBridgeServer(
             ("127.0.0.1", 0),
             WhisperBridgeHandler,
@@ -76,6 +82,10 @@ class WhisperCppBridgeTests(unittest.TestCase):
             max_queued_requests=2,
             queue_timeout_seconds=1,
             api_token="test-token",
+            batch_client=batch_client,
+            batch_threshold_seconds=5,
+            max_batch_queued_requests=1,
+            batch_queue_timeout_seconds=0,
         )
         self.bridge_thread = threading.Thread(
             target=self.bridge.serve_forever,
@@ -111,6 +121,10 @@ class WhisperCppBridgeTests(unittest.TestCase):
         self.assertTrue(payload["backend_ready"])
         self.assertEqual(payload["model"], "ggml-large-v3")
         self.assertEqual(payload["device"], "vulkan:1")
+        self.assertTrue(payload["live_backend_ready"])
+        self.assertTrue(payload["batch_backend_ready"])
+        self.assertEqual(payload["lanes"]["live"]["capacity"], 2)
+        self.assertEqual(payload["lanes"]["batch"]["capacity"], 1)
 
     def test_raw_wav_contract_returns_text_and_metrics(self):
         status, payload = self._request(
@@ -123,7 +137,32 @@ class WhisperCppBridgeTests(unittest.TestCase):
         self.assertEqual(payload["audio_seconds"], 1.0)
         self.assertEqual(payload["model"], "ggml-large-v3")
         self.assertEqual(payload["language"], "en")
+        self.assertEqual(payload["lane"], "live")
         self.assertGreaterEqual(payload["inference_seconds"], 0)
+
+    def test_long_audio_routes_to_bounded_batch_lane(self):
+        status, payload = self._request(
+            "/transcription?language=en",
+            data=_wav_bytes(6.0),
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["audio_seconds"], 6.0)
+        self.assertEqual(payload["lane"], "batch")
+        self.assertEqual(
+            payload["endpoint_version"],
+            "2026-07-26-whisper-cpp-dual-lane",
+        )
+
+    def test_explicit_batch_lane_keeps_refinement_off_live_lane(self):
+        status, payload = self._request(
+            "/transcription?language=en&lane=batch",
+            data=_wav_bytes(2.0),
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["audio_seconds"], 2.0)
+        self.assertEqual(payload["lane"], "batch")
 
     def test_stats_requires_token(self):
         with self.assertRaises(urllib.error.HTTPError) as raised:
@@ -150,6 +189,23 @@ class WhisperCppBridgeTests(unittest.TestCase):
         self.assertIn('"^GPU1:"', unit)
         self.assertIn('"deviceName.*AMD Radeon"', unit)
         self.assertIn("TimeoutStartSec=120", unit)
+        self.assertIn("-p 2", unit)
+
+    def test_bridge_unit_reserves_live_and_batch_lanes(self):
+        unit = (
+            Path(__file__).resolve().parent
+            / "ops/linux/ntc-whisper-bridge.service"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("--batch-backend-url http://127.0.0.1:8767/inference", unit)
+        self.assertIn("--batch-threshold-seconds 30", unit)
+        self.assertIn("--max-queued-requests 2", unit)
+        self.assertIn("--max-batch-queued-requests 1", unit)
+
+        source = (
+            Path(__file__).resolve().parent / "ntc_transcription_source.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('lane="batch"', source)
 
 
 if __name__ == "__main__":
