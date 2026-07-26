@@ -280,23 +280,6 @@ class TranscriptionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertIn("/transcription/settings/login", response.headers["Location"])
 
-    def test_admin_alias_uses_settings_panel(self):
-        response = self.client.get("/transcription/admin")
-
-        self.assertEqual(response.status_code, 302)
-        self.assertIn("/transcription/settings/login", response.headers["Location"])
-        self.assertIn("next=/transcription/admin", response.headers["Location"])
-
-        login = self.client.post(
-            "/transcription/settings/login",
-            data={"password": "settings-password", "next": "/transcription/admin"},
-            follow_redirects=True,
-        )
-
-        self.assertEqual(login.status_code, 200)
-        self.assertIn(b"Transcription Settings", login.data)
-        self.assertIn(b"Source Transcription", login.data)
-
     def test_settings_login_page_uses_password_only(self):
         response = self.client.get("/transcription/settings/login")
 

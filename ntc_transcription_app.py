@@ -1644,10 +1644,6 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
             brand_background_url=url_for("ntc_brand_background"),
         )
 
-    @app.get("/transcription/admin")
-    def transcription_admin():
-        return transcription_settings()
-
     @app.get("/transcription/api/internal/transcription/settings/status")
     @app.get("/api/internal/transcription/settings/status")
     def settings_status():
@@ -2169,12 +2165,68 @@ SETTINGS_TEMPLATE = """
         color: var(--warn);
         border-color: rgba(255, 209, 102, 0.34);
       }
+      .control-shell {
+        display: grid;
+        gap: 1rem;
+        padding: 1.05rem;
+        margin: 0 0 1rem;
+        border: 1px solid var(--line);
+        border-radius: 24px;
+        background: var(--surface);
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(18px);
+      }
+      .control-head {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 0.8rem;
+        align-items: start;
+      }
+      .control-head h2 {
+        margin: 0.18rem 0 0;
+        font-size: clamp(1.35rem, 2.4vw, 2rem);
+        line-height: 1;
+        letter-spacing: 0;
+      }
+      .control-head p {
+        margin: 0.35rem 0 0;
+        color: var(--muted);
+        line-height: 1.4;
+      }
+      .state-pill {
+        display: inline-flex;
+        width: fit-content;
+        align-items: center;
+        min-height: 2.25rem;
+        padding: 0.48rem 0.8rem;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        background: rgba(18, 34, 53, 0.78);
+        color: var(--text);
+        font-weight: 850;
+        white-space: nowrap;
+      }
+      .state-pill.good {
+        border-color: rgba(116, 221, 180, 0.44);
+        background: var(--good-soft);
+        color: var(--good);
+      }
+      .state-pill.warn {
+        border-color: rgba(255, 183, 112, 0.42);
+        background: var(--warn-soft);
+        color: var(--warn);
+      }
+      .state-pill.bad {
+        border-color: rgba(255, 155, 155, 0.38);
+        background: var(--bad-soft);
+        color: var(--bad);
+      }
       .tabs {
         display: grid;
         grid-template-columns: repeat(3, minmax(0, 1fr));
         gap: 0.28rem;
         width: min(820px, 100%);
-        margin: 1rem auto 1.4rem;
+        margin: 0 auto;
         padding: 0.28rem;
         border: 1px solid var(--line);
         border-radius: 999px;
@@ -2241,9 +2293,8 @@ SETTINGS_TEMPLATE = """
         display: grid;
         grid-template-columns: repeat(4, minmax(0, 1fr));
         gap: 0.75rem;
-        margin-bottom: 1rem;
+        margin: 0;
       }
-      .status-tile,
       .card {
         border: 1px solid var(--line);
         border-radius: 24px;
@@ -2252,6 +2303,9 @@ SETTINGS_TEMPLATE = """
         backdrop-filter: blur(18px);
       }
       .status-tile {
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: rgba(6, 13, 20, 0.72);
         padding: 0.95rem;
         min-height: 82px;
       }
@@ -2742,6 +2796,9 @@ SETTINGS_TEMPLATE = """
         .status-strip,
         .meta-grid,
         .select-row { grid-template-columns: 1fr; }
+        .control-shell { padding: 0.72rem; }
+        .control-head { grid-template-columns: 1fr; }
+        .control-head .state-pill { justify-self: start; }
         .tabs {
           grid-template-columns: repeat(3, minmax(0, 1fr));
           width: min(100%, 620px);
@@ -2821,41 +2878,58 @@ SETTINGS_TEMPLATE = """
       {% if message %}<div class="notice">{{ message }}</div>{% endif %}
       {% if error %}<div class="notice error">{{ error }}</div>{% endif %}
 
-      <nav class="tabs">
-        {% for room in rooms %}
-          <a class="tab {% if selected and room.slug == selected.slug %}active{% endif %}" href="{{ url_for('transcription_settings', room=room.slug) }}" data-room-tab="{{ room.slug }}">
-            <span class="tab-title">{{ room.label }}</span>
-            <span class="dot {{ room.source_status_tone }}" data-room-dot></span>
-          </a>
-        {% endfor %}
-      </nav>
+      <section class="control-shell" aria-label="Transcription source controls">
+        <div class="control-head">
+          <div>
+            <span class="eyebrow">Audio Source</span>
+            <h2>{{ selected.label if selected else "Select Source" }}</h2>
+            <p>Only one source should feed the public transcription display at a time.</p>
+          </div>
+          {% if selected %}
+            <span class="state-pill {{ selected.source_status_tone }}" data-status-field="source">{{ selected.source_status_label }}</span>
+          {% else %}
+            <span class="state-pill">No Source</span>
+          {% endif %}
+        </div>
 
-      {% if selected %}
-      <section class="status-strip" aria-label="Selected room status">
-        <div class="status-tile">
-          <span class="label">Transcription</span>
-          <span class="status-value" data-status-field="transcription">{{ "On" if selected.transcription_enabled else "Off" }}</span>
-        </div>
-        <div class="status-tile">
-          <span class="label">Source</span>
-          <span class="status-value source {{ selected.source_status_tone }}" data-status-field="source">{{ selected.source_status_label }}</span>
-        </div>
-        <div class="status-tile">
-          <span class="label">Ingest</span>
-          <span class="status-value" data-status-field="ingest">{{ "Running" if selected.source_ingesting else "Stopped" }}</span>
-        </div>
-        <div class="status-tile">
-          <span class="label">Output</span>
-          <span class="status-value" data-status-field="output">
-            {% if selected.translation_output_supported %}
-              {{ "On" if selected.translation_output_enabled else "Off" }}
-            {% else %}
-              Unavailable
-            {% endif %}
-          </span>
-        </div>
+        <nav class="tabs">
+          {% for room in rooms %}
+            <a class="tab {% if selected and room.slug == selected.slug %}active{% endif %}" href="{{ url_for('transcription_settings', room=room.slug) }}" data-room-tab="{{ room.slug }}">
+              <span class="tab-title">{{ room.label }}</span>
+              <span class="dot {{ room.source_status_tone }}" data-room-dot></span>
+            </a>
+          {% endfor %}
+        </nav>
+
+        {% if selected %}
+        <section class="status-strip" aria-label="Selected room status">
+          <div class="status-tile">
+            <span class="label">Transcription</span>
+            <span class="status-value" data-status-field="transcription">{{ "On" if selected.transcription_enabled else "Off" }}</span>
+          </div>
+          <div class="status-tile">
+            <span class="label">Source</span>
+            <span class="status-value source {{ selected.source_status_tone }}" data-status-field="source">{{ selected.source_status_label }}</span>
+          </div>
+          <div class="status-tile">
+            <span class="label">Ingest</span>
+            <span class="status-value" data-status-field="ingest">{{ "Running" if selected.source_ingesting else "Stopped" }}</span>
+          </div>
+          <div class="status-tile">
+            <span class="label">Output</span>
+            <span class="status-value" data-status-field="output">
+              {% if selected.translation_output_supported %}
+                {{ "On" if selected.translation_output_enabled else "Off" }}
+              {% else %}
+                Unavailable
+              {% endif %}
+            </span>
+          </div>
+        </section>
+        {% endif %}
       </section>
 
+      {% if selected %}
       <div class="layout">
         <div class="stack">
           <section class="card">
@@ -3134,8 +3208,9 @@ SETTINGS_TEMPLATE = """
         let inFlight = false;
 
         function setText(selector, value) {
-          const element = document.querySelector(selector);
-          if (element) element.textContent = value;
+          document.querySelectorAll(selector).forEach((element) => {
+            element.textContent = value;
+          });
         }
 
         function setDetailPill(selector, value, active) {
@@ -3235,11 +3310,10 @@ SETTINGS_TEMPLATE = """
           if (!room) return;
 
           setText('[data-status-field="transcription"]', room.transcription_enabled ? "On" : "Off");
-          const statusSource = document.querySelector('[data-status-field="source"]');
-          if (statusSource) {
+          document.querySelectorAll('[data-status-field="source"]').forEach((statusSource) => {
             statusSource.textContent = room.source_status_label || "Idle";
             setTone(statusSource, room.source_status_tone || "");
-          }
+          });
           setText('[data-status-field="ingest"]', room.source_ingesting ? "Running" : "Stopped");
           setText(
             '[data-status-field="output"]',
