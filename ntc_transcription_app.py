@@ -1644,6 +1644,10 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
             brand_background_url=url_for("ntc_brand_background"),
         )
 
+    @app.get("/transcription/admin")
+    def transcription_admin():
+        return transcription_settings()
+
     @app.get("/transcription/api/internal/transcription/settings/status")
     @app.get("/api/internal/transcription/settings/status")
     def settings_status():
@@ -2024,15 +2028,16 @@ SETTINGS_TEMPLATE = """
     <title>{{ title }}</title>
     <style>
       :root {
-        --bg: #07121e;
-        --surface: rgba(10, 21, 36, 0.92);
-        --surface-2: rgba(18, 34, 53, 0.9);
-        --surface-3: rgba(6, 13, 24, 0.58);
+        color-scheme: dark;
+        --bg: #081018;
+        --surface: rgba(15, 24, 34, 0.92);
+        --surface-2: rgba(20, 32, 48, 0.9);
+        --surface-3: rgba(26, 40, 56, 0.72);
         --text: #edf7ff;
-        --muted: #9fb2c6;
-        --line: rgba(143, 211, 255, 0.2);
-        --line-strong: rgba(143, 211, 255, 0.36);
-        --accent: #8fd3ff;
+        --muted: #99a8b8;
+        --line: #213244;
+        --line-strong: #31506d;
+        --accent: #87d6ff;
         --good: #74ddb4;
         --good-soft: rgba(116, 221, 180, 0.12);
         --warn: #ffb770;
@@ -2053,7 +2058,9 @@ SETTINGS_TEMPLATE = """
         color: var(--text);
         font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
         background:
-          linear-gradient(180deg, rgba(5, 10, 18, 0.50), rgba(5, 10, 18, 0.88)),
+          radial-gradient(circle at 10% 0%, rgba(143, 211, 255, 0.2), transparent 28rem),
+          radial-gradient(circle at 100% 12%, rgba(116, 221, 180, 0.1), transparent 24rem),
+          linear-gradient(180deg, rgba(5, 10, 18, 0.54), rgba(5, 10, 18, 0.9)),
           radial-gradient(circle at 12% 0%, rgba(143, 211, 255, 0.18), transparent 30rem),
           radial-gradient(circle at 96% 14%, rgba(116, 221, 180, 0.10), transparent 28rem),
           #050913;
@@ -2068,8 +2075,11 @@ SETTINGS_TEMPLATE = """
         inset: 0;
         z-index: 0;
         pointer-events: none;
-        background: url("{{ brand_background_url }}") center / cover no-repeat;
-        opacity: 0.31;
+        background-image: url("{{ brand_background_url }}");
+        background-position: center;
+        background-repeat: no-repeat;
+        background-size: cover;
+        opacity: 0.28;
         filter: saturate(1.08) contrast(1.04) brightness(0.9);
       }
       main {
@@ -2092,8 +2102,8 @@ SETTINGS_TEMPLATE = """
         justify-items: center;
         text-align: center;
       }
-      h1 {
-        margin: 0;
+      .brand h1 {
+        margin: 0.28rem 0 0;
         font-size: clamp(2.2rem, 5.2vw, 4rem);
         line-height: 0.94;
         letter-spacing: 0;
@@ -2183,6 +2193,7 @@ SETTINGS_TEMPLATE = """
         padding: 0.58rem 0.82rem;
         text-decoration: none;
         min-height: 2.65rem;
+        font-weight: 800;
         transition: border-color 140ms ease, background 140ms ease, transform 140ms ease, color 140ms ease;
       }
       .tab:hover,
@@ -2212,6 +2223,7 @@ SETTINGS_TEMPLATE = """
       }
       .dot.good { background: var(--good); }
       .dot.warn { background: var(--warn); }
+      .dot.bad { background: var(--bad); }
       .notice {
         border-radius: 12px;
         padding: 0.82rem 0.95rem;
@@ -2269,6 +2281,7 @@ SETTINGS_TEMPLATE = """
         padding: 0.34rem 0.68rem;
         background: rgba(143, 211, 255, 0.08);
         color: var(--text);
+        font-size: 0.95rem;
       }
       .status-value.source.good {
         border-color: rgba(116, 221, 180, 0.38);
@@ -2279,6 +2292,11 @@ SETTINGS_TEMPLATE = """
         border-color: rgba(255, 183, 112, 0.38);
         background: rgba(255, 183, 112, 0.12);
         color: var(--warn);
+      }
+      .status-value.source.bad {
+        border-color: rgba(255, 155, 155, 0.38);
+        background: var(--bad-soft);
+        color: var(--bad);
       }
       .layout {
         display: grid;
@@ -2316,6 +2334,7 @@ SETTINGS_TEMPLATE = """
         min-height: 30px;
         padding: 6px 10px;
         border-radius: 999px;
+        border: 1px solid var(--line);
         background: rgba(18, 34, 53, 0.78);
         color: #d8dde2;
         font-size: 0.82rem;
@@ -2343,11 +2362,11 @@ SETTINGS_TEMPLATE = """
         border-radius: 14px;
         background: var(--surface-2);
         color: var(--text);
-        min-height: 3.35rem;
-        min-width: 10.5rem;
-        padding: 0.72rem 0.85rem;
+        min-height: 3.55rem;
+        min-width: 14.25rem;
+        padding: 0.92rem 1.45rem;
         display: inline-grid;
-        grid-template-columns: 0.58rem 6.7rem;
+        grid-template-columns: 0.58rem auto;
         align-items: center;
         justify-items: start;
         justify-content: center;
@@ -2368,13 +2387,15 @@ SETTINGS_TEMPLATE = """
         color: var(--good);
       }
       .switch-control.is-off {
-        color: var(--muted);
+        border-color: rgba(255, 155, 155, 0.34);
+        background: rgba(255, 155, 155, 0.08);
+        color: var(--bad);
       }
       .switch-copy {
         display: grid;
         gap: 0.1rem;
         min-width: 0;
-        width: 6.7rem;
+        min-width: 6.7rem;
       }
       .switch-label {
         color: currentColor;
@@ -2387,7 +2408,7 @@ SETTINGS_TEMPLATE = """
         color: currentColor;
       }
       .switch-caption {
-        color: var(--muted);
+        color: rgba(237, 247, 255, 0.66);
         font-size: 0.72rem;
         font-weight: 700;
         line-height: 1.2;
@@ -2406,9 +2427,12 @@ SETTINGS_TEMPLATE = """
       }
       .select-row {
         display: grid;
-        grid-template-columns: minmax(160px, 1fr) auto;
+        grid-template-columns: minmax(160px, 1fr) minmax(14.25rem, auto);
         gap: 0.65rem;
         margin-top: 0.85rem;
+      }
+      .select-row .button {
+        min-height: 2.75rem;
       }
       select {
         min-height: 2.75rem;
@@ -2710,7 +2734,7 @@ SETTINGS_TEMPLATE = """
           grid-template-columns: auto minmax(0, 1fr) auto;
           gap: 0.45rem;
         }
-        h1 { font-size: clamp(1.25rem, 6.4vw, 2.1rem); }
+        .brand h1 { font-size: clamp(1.25rem, 6.4vw, 2.1rem); }
         .sub { font-size: 0.76rem; line-height: 1.25; }
         .eyebrow { font-size: 0.58rem; padding: 0.17rem 0.42rem; }
         .button { padding: 0.52rem 0.58rem; font-size: 0.78rem; border-radius: 12px; }
@@ -2737,10 +2761,11 @@ SETTINGS_TEMPLATE = """
         .switch-form,
         .switch-control { width: 100%; }
         .switch-control {
-          grid-template-columns: 0.58rem 5rem;
+          grid-template-columns: 0.58rem auto;
+          min-width: 0;
         }
         .switch-copy {
-          width: 5rem;
+          min-width: 5rem;
         }
         .archive-row {
           grid-template-columns: 1fr;
