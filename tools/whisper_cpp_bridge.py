@@ -8,6 +8,8 @@ import contextlib
 import io
 import json
 import os
+import re
+import subprocess
 import threading
 import time
 import urllib.error
@@ -26,6 +28,9 @@ DEFAULT_BATCH_THRESHOLD_SECONDS = 30.0
 DEFAULT_MAX_BATCH_QUEUED_REQUESTS = 1
 DEFAULT_BATCH_QUEUE_TIMEOUT_SECONDS = 1.0
 DEFAULT_BATCH_BACKEND_TIMEOUT_SECONDS = 300.0
+DEFAULT_BATCH_START_TIMEOUT_SECONDS = 45.0
+DEFAULT_BATCH_IDLE_SECONDS = 120.0
+SYSTEMD_SERVICE_PATTERN = re.compile(r"^[A-Za-z0-9_.@:-]+\.service$")
 
 
 def _json_bytes(payload: dict) -> bytes:
@@ -92,6 +97,10 @@ class WhisperCppClient:
         model: str,
         device: str,
         fast_mode: bool = False,
+        managed_service: str = "",
+        conflicting_service: str = "",
+        service_start_timeout_seconds: float = DEFAULT_BATCH_START_TIMEOUT_SECONDS,
+        service_idle_seconds: float = DEFAULT_BATCH_IDLE_SECONDS,
     ):
         self.backend_url = backend_url
         self.backend_timeout_seconds = backend_timeout_seconds
@@ -99,6 +108,103 @@ class WhisperCppClient:
         self.device = device
         self.fast_mode = fast_mode
         self.lock = threading.Lock()
+        self.managed_service = self._validated_service_name(managed_service)
+        self.conflicting_service = self._validated_service_name(
+            conflicting_service
+        )
+        self.service_start_timeout_seconds = max(
+            1.0,
+            float(service_start_timeout_seconds),
+        )
+        self.service_idle_seconds = max(0.0, float(service_idle_seconds))
+        self.idle_timer: threading.Timer | None = None
+        self.idle_generation = 0
+        if self.managed_service and self.service_idle_seconds:
+            self._schedule_idle_stop()
+
+    @staticmethod
+    def _validated_service_name(service_name: str) -> str:
+        normalized = str(service_name or "").strip()
+        if normalized and not SYSTEMD_SERVICE_PATTERN.fullmatch(normalized):
+            raise ValueError(f"invalid systemd service name: {normalized}")
+        return normalized
+
+    @property
+    def managed(self) -> bool:
+        return bool(self.managed_service)
+
+    def _systemctl(self, action: str, service_name: str) -> None:
+        completed = subprocess.run(
+            ["/usr/bin/systemctl", "--user", action, service_name],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if completed.returncode:
+            detail = (completed.stderr or completed.stdout or "").strip()
+            raise RuntimeError(
+                f"systemctl {action} {service_name} failed: {detail[:180]}"
+            )
+
+    def _cancel_idle_stop(self) -> None:
+        self.idle_generation += 1
+        timer = self.idle_timer
+        self.idle_timer = None
+        if timer:
+            timer.cancel()
+
+    def _schedule_idle_stop(self) -> None:
+        self._cancel_idle_stop()
+        if not self.managed or not self.service_idle_seconds:
+            return
+        generation = self.idle_generation
+        timer = threading.Timer(
+            self.service_idle_seconds,
+            self._stop_managed_service,
+            args=(generation,),
+        )
+        timer.daemon = True
+        self.idle_timer = timer
+        timer.start()
+
+    def _stop_managed_service(self, generation: int) -> None:
+        with self.lock:
+            if generation != self.idle_generation:
+                return
+            self.idle_timer = None
+            try:
+                self._systemctl("stop", self.managed_service)
+                if self.conflicting_service:
+                    self._systemctl("start", self.conflicting_service)
+            except Exception as exc:
+                print(
+                    f"managed Whisper idle stop failed: {exc}",
+                    flush=True,
+                )
+
+    def _ensure_managed_service(self) -> None:
+        if not self.managed or self.ready():
+            return
+        if self.conflicting_service:
+            self._systemctl("stop", self.conflicting_service)
+        try:
+            self._systemctl("start", self.managed_service)
+            deadline = time.monotonic() + self.service_start_timeout_seconds
+            while time.monotonic() < deadline:
+                if self.ready():
+                    return
+                time.sleep(0.25)
+        except Exception:
+            if self.conflicting_service:
+                self._systemctl("start", self.conflicting_service)
+            raise
+        if self.conflicting_service:
+            self._systemctl("start", self.conflicting_service)
+        raise RuntimeError(
+            f"{self.managed_service} did not become ready within "
+            f"{self.service_start_timeout_seconds:.1f} seconds"
+        )
 
     def ready(self) -> bool:
         root_url = self.backend_url.rsplit("/", 1)[0] + "/"
@@ -109,32 +215,40 @@ class WhisperCppClient:
             return False
 
     def transcribe(self, wav_bytes: bytes, *, language: str, prompt: str) -> dict:
-        body, content_type = _multipart_body(
-            wav_bytes,
-            language=language,
-            prompt=prompt,
-            fast_mode=self.fast_mode,
-        )
-        request = urllib.request.Request(
-            self.backend_url,
-            data=body,
-            headers={
-                "Content-Type": content_type,
-                "Content-Length": str(len(body)),
-            },
-            method="POST",
-        )
-        started_at = time.monotonic()
         with self.lock:
-            with urllib.request.urlopen(
-                request,
-                timeout=self.backend_timeout_seconds,
-            ) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        return {
-            "text": str(payload.get("text") or "").strip(),
-            "inference_seconds": round(time.monotonic() - started_at, 3),
-        }
+            self._cancel_idle_stop()
+            self._ensure_managed_service()
+            try:
+                body, content_type = _multipart_body(
+                    wav_bytes,
+                    language=language,
+                    prompt=prompt,
+                    fast_mode=self.fast_mode,
+                )
+                request = urllib.request.Request(
+                    self.backend_url,
+                    data=body,
+                    headers={
+                        "Content-Type": content_type,
+                        "Content-Length": str(len(body)),
+                    },
+                    method="POST",
+                )
+                started_at = time.monotonic()
+                with urllib.request.urlopen(
+                    request,
+                    timeout=self.backend_timeout_seconds,
+                ) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                return {
+                    "text": str(payload.get("text") or "").strip(),
+                    "inference_seconds": round(
+                        time.monotonic() - started_at,
+                        3,
+                    ),
+                }
+            finally:
+                self._schedule_idle_stop()
 
 
 class WhisperBridgeServer(ThreadingHTTPServer):
@@ -316,6 +430,10 @@ class WhisperBridgeHandler(BaseHTTPRequestHandler):
                 "backend_ready": live_ready,
                 "live_backend_ready": live_ready,
                 "batch_backend_ready": batch_ready,
+                "batch_backend_managed": bool(
+                    self.server.batch_client
+                    and self.server.batch_client.managed
+                ),
                 "model": self.server.client.model,
                 "device": self.server.client.device,
                 "uptime_seconds": round(time.time() - self.server.started_at, 3),
@@ -528,6 +646,34 @@ def main() -> int:
         default=os.getenv("NTC_WHISPER_BATCH_DEVICE", ""),
     )
     parser.add_argument(
+        "--batch-service",
+        default=os.getenv("NTC_WHISPER_BATCH_SERVICE", ""),
+    )
+    parser.add_argument(
+        "--batch-conflicting-service",
+        default=os.getenv("NTC_WHISPER_BATCH_CONFLICTING_SERVICE", ""),
+    )
+    parser.add_argument(
+        "--batch-service-start-timeout-seconds",
+        type=float,
+        default=float(
+            os.getenv(
+                "NTC_WHISPER_BATCH_SERVICE_START_TIMEOUT_SECONDS",
+                str(DEFAULT_BATCH_START_TIMEOUT_SECONDS),
+            )
+        ),
+    )
+    parser.add_argument(
+        "--batch-service-idle-seconds",
+        type=float,
+        default=float(
+            os.getenv(
+                "NTC_WHISPER_BATCH_SERVICE_IDLE_SECONDS",
+                str(DEFAULT_BATCH_IDLE_SECONDS),
+            )
+        ),
+    )
+    parser.add_argument(
         "--model",
         default=os.getenv("NTC_WHISPER_MODEL", "ggml-large-v3"),
     )
@@ -606,6 +752,16 @@ def main() -> int:
             ),
             model=args.batch_model or args.model,
             device=args.batch_device or args.device,
+            managed_service=args.batch_service,
+            conflicting_service=args.batch_conflicting_service,
+            service_start_timeout_seconds=max(
+                1.0,
+                args.batch_service_start_timeout_seconds,
+            ),
+            service_idle_seconds=max(
+                0.0,
+                args.batch_service_idle_seconds,
+            ),
         )
     server = WhisperBridgeServer(
         (args.host, args.port),

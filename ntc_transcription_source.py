@@ -354,7 +354,6 @@ BROWSER_CAPTURE_TEMPLATE = """
         <button class="marker" type="button" data-marker-text="[Song]">[Song]</button>
         <button class="marker" type="button" data-marker-text="[Prophecy]">[Prophecy]</button>
         <button class="marker" type="button" data-marker-text="[Announcements]">[Announcements]</button>
-        <button class="marker" id="tonevision-button" type="button" onclick="takeToneVision()">Take ToneVision</button>
       </div>
       <div class="insert-panel">
         <label for="custom-marker">Custom Marker</label>
@@ -377,11 +376,9 @@ BROWSER_CAPTURE_TEMPLATE = """
     const chunkUrl = `/transcription/api/source/browser/chunk/${encodeURIComponent(hostSlug)}?token=${encodeURIComponent(token)}`;
     const stopUrl = `/transcription/api/source/browser/stop/${encodeURIComponent(hostSlug)}?token=${encodeURIComponent(token)}`;
     const markerUrl = `/transcription/api/source/browser/marker/${encodeURIComponent(hostSlug)}?token=${encodeURIComponent(token)}`;
-    const tonevisionTakeoverUrl = `/transcription/api/source/browser/tonevision/takeover/${encodeURIComponent(hostSlug)}?token=${encodeURIComponent(token)}`;
     const startButton = document.getElementById("start-button");
     const stopButton = document.getElementById("stop-button");
     const muteButton = document.getElementById("mute-button");
-    const tonevisionButton = document.getElementById("tonevision-button");
     const customMarkerInput = document.getElementById("custom-marker");
     const customMarkerButton = document.getElementById("custom-marker-button");
     const statePill = document.getElementById("state-pill");
@@ -558,27 +555,6 @@ BROWSER_CAPTURE_TEMPLATE = """
       customMarkerInput.focus();
     }
 
-    async function takeToneVision() {
-      if (!token) {
-        setState("Token Needed", "warn");
-        setMessage("Open the paired capture link from transcription settings.");
-        return;
-      }
-      tonevisionButton.disabled = true;
-      setMessage("Taking ToneVision transmitter...");
-      try {
-        const payload = await postJson(tonevisionTakeoverUrl, {});
-        setMessage(`TrueNAS is now transmitter for ${payload.tonevision_room || "ToneVision"}.`);
-        debug(`ToneVision takeover started; room=${payload.tonevision_room || ""}`);
-      } catch (error) {
-        setState("Error", "bad");
-        setMessage(error.message || "ToneVision takeover failed.");
-        debug(`ToneVision takeover failed: ${error.message || error}`);
-      } finally {
-        tonevisionButton.disabled = false;
-      }
-    }
-
     async function drainChunks() {
       if (sending) return;
       sending = true;
@@ -718,7 +694,6 @@ BROWSER_CAPTURE_TEMPLATE = """
     window.toggleMute = toggleMute;
     window.insertMarker = insertMarker;
     window.insertCustomMarker = insertCustomMarker;
-    window.takeToneVision = takeToneVision;
     startButton.addEventListener("click", startCapture);
     stopButton.addEventListener("click", () => stopCapture(true));
     document.querySelectorAll("[data-marker-text]").forEach((button) => {
@@ -1162,15 +1137,6 @@ def install_source_api(app, transcription_store) -> None:
     transcription_lock = threading.Lock()
     browser_capture_states: dict[str, dict] = {}
     browser_capture_lock = threading.Lock()
-    tonevision_bridge_lock = threading.Lock()
-    tonevision_bridge_state: dict[str, object] = {
-        "thread": None,
-        "stop_event": None,
-        "started_at": "",
-        "last_error": "",
-        "tonevision_room": "",
-        "ntc_room": "",
-    }
 
     def source_base_url() -> str:
         configured = (app.config.get("NTC_TRANSCRIPTION_SOURCE_PUBLIC_BASE_URL") or "").strip().rstrip("/")
@@ -1224,97 +1190,6 @@ def install_source_api(app, transcription_store) -> None:
             return False
         return bool(host.get("transcription_desired_active") and provider_ready(provider()))
 
-    def start_tonevision_takeover(host: dict) -> dict:
-        try:
-            from tools.tonevision_bridge import ToneVisionWebSocket, tonevision_ws_url, trim_buffer
-        except ImportError as exc:  # pragma: no cover - deployment packaging guard
-            raise RuntimeError("ToneVision bridge tool is not available in this deployment") from exc
-
-        tonevision_base_url = (
-            app.config.get("NTC_TONEVISION_BASE_URL")
-            or os.getenv("NTC_TONEVISION_BASE_URL")
-            or "http://100.96.175.75:8080"
-        ).strip()
-        tonevision_room = (
-            app.config.get("NTC_TONEVISION_ROOM")
-            or os.getenv("NTC_TONEVISION_ROOM")
-            or "english"
-        ).strip()
-        tonevision_pin = (
-            app.config.get("NTC_TONEVISION_PIN")
-            or os.getenv("NTC_TONEVISION_PIN")
-            or "1234"
-        ).strip()
-        if not tonevision_pin:
-            raise RuntimeError("ToneVision PIN is not configured")
-        poll_seconds = max(0.2, float(app.config.get("NTC_TONEVISION_POLL_SECONDS", os.getenv("NTC_TONEVISION_POLL_SECONDS", "0.7"))))
-        max_chars = max(1000, int(app.config.get("NTC_TONEVISION_MAX_CHARS", os.getenv("NTC_TONEVISION_MAX_CHARS", "60000"))))
-        timeout_seconds = max(2.0, float(app.config.get("NTC_TONEVISION_TIMEOUT_SECONDS", os.getenv("NTC_TONEVISION_TIMEOUT_SECONDS", "10.0"))))
-        room_slug = host["room_slug"]
-
-        with tonevision_bridge_lock:
-            previous_stop = tonevision_bridge_state.get("stop_event")
-            if isinstance(previous_stop, threading.Event):
-                previous_stop.set()
-            stop_event = threading.Event()
-            tonevision_bridge_state.update(
-                {
-                    "thread": None,
-                    "stop_event": stop_event,
-                    "started_at": _utc_now(),
-                    "last_error": "",
-                    "tonevision_room": tonevision_room,
-                    "ntc_room": room_slug,
-                }
-            )
-
-        def bridge_worker() -> None:
-            ws = None
-            last_id = 0
-            buffer_parts: list[str] = []
-            try:
-                latest = transcription_store.list_recent_segments(room_slug, limit=1)
-                last_id = max((int(segment.get("id") or 0) for segment in latest), default=0)
-                ws = ToneVisionWebSocket(
-                    tonevision_ws_url(tonevision_base_url, tonevision_room, tonevision_pin),
-                    timeout=timeout_seconds,
-                )
-                ws.connect()
-                ws.send_json({"type": "pause", "paused": False})
-                ws.send_json({"type": "text", "text": ""})
-                app.logger.info("ToneVision takeover connected room=%s ntc_room=%s after_id=%s", tonevision_room, room_slug, last_id)
-                while not stop_event.wait(poll_seconds):
-                    segments = transcription_store.list_segments_after(room_slug, after_id=last_id, limit=80)
-                    if not segments:
-                        continue
-                    for segment in segments:
-                        segment_id = int(segment.get("id") or 0)
-                        text = " ".join(str(segment.get("text") or "").split())
-                        if segment_id > 0:
-                            last_id = max(last_id, segment_id)
-                        if text:
-                            buffer_parts.append(text)
-                    if buffer_parts:
-                        ws.send_json({"type": "text", "text": trim_buffer(buffer_parts, max_chars)})
-            except Exception as exc:
-                with tonevision_bridge_lock:
-                    tonevision_bridge_state["last_error"] = str(exc)
-                app.logger.warning("ToneVision takeover bridge failed room=%s error=%s", tonevision_room, exc)
-            finally:
-                if ws:
-                    ws.close()
-
-        thread = threading.Thread(target=bridge_worker, daemon=True, name=f"ntc-tonevision-{tonevision_room}")
-        with tonevision_bridge_lock:
-            tonevision_bridge_state["thread"] = thread
-        thread.start()
-        return {
-            "tonevision_base_url": tonevision_base_url,
-            "tonevision_room": tonevision_room,
-            "ntc_room": room_slug,
-            "started_at": tonevision_bridge_state["started_at"],
-        }
-
     def stream_descriptor(snapshot: dict | None = None):
         runtime = (snapshot or {}).get("runtime") or {}
         return {
@@ -1337,11 +1212,37 @@ def install_source_api(app, transcription_store) -> None:
         prompt: str,
         language: str,
         lane: str,
-    ) -> str:
+    ) -> tuple[str, dict]:
         urls = local_urls()
         if not urls:
             raise RuntimeError("local transcription URL is not configured")
-        timeout_seconds = max(5.0, float(app.config.get("NTC_TRANSCRIPTION_TIMEOUT_SECONDS", 25.0)))
+        fallback_timeout_seconds = max(
+            5.0,
+            float(app.config.get("NTC_TRANSCRIPTION_TIMEOUT_SECONDS", 25.0)),
+        )
+        connect_timeout_seconds = max(
+            0.5,
+            float(
+                app.config.get(
+                    "NTC_TRANSCRIPTION_CONNECT_TIMEOUT_SECONDS",
+                    3.0,
+                )
+            ),
+        )
+        lane_timeout_name = (
+            "NTC_TRANSCRIPTION_BATCH_TIMEOUT_SECONDS"
+            if lane == "batch"
+            else "NTC_TRANSCRIPTION_LIVE_TIMEOUT_SECONDS"
+        )
+        read_timeout_seconds = max(
+            5.0,
+            float(
+                app.config.get(
+                    lane_timeout_name,
+                    fallback_timeout_seconds,
+                )
+            ),
+        )
         params = {}
         if current_model:
             params["model"] = current_model
@@ -1359,20 +1260,31 @@ def install_source_api(app, transcription_store) -> None:
                     params=params,
                     data=wav_bytes,
                     headers={"Content-Type": "audio/wav"},
-                    timeout=timeout_seconds,
+                    timeout=(
+                        connect_timeout_seconds,
+                        read_timeout_seconds,
+                    ),
                 )
                 if response.status_code >= 400:
                     failures.append(f"{url}: HTTP {response.status_code} {response.text[:160]}")
                     continue
                 try:
-                    return _extract_transcription_text(response.json())
+                    payload = response.json()
+                    metadata = payload if isinstance(payload, dict) else {}
+                    return _extract_transcription_text(payload), metadata
                 except ValueError:
-                    return _extract_transcription_text(response.text)
+                    return _extract_transcription_text(response.text), {}
             except requests.RequestException as exc:
                 failures.append(f"{url}: {exc}")
         raise RuntimeError(f"local transcription service failed for all configured URLs: {'; '.join(failures)[:500]}")
 
-    def transcribe_audio_chunk_local_cmd(wav_bytes: bytes, *, current_model: str, prompt: str, language: str) -> str:
+    def transcribe_audio_chunk_local_cmd(
+        wav_bytes: bytes,
+        *,
+        current_model: str,
+        prompt: str,
+        language: str,
+    ) -> tuple[str, dict]:
         if not _config_enabled(app, "NTC_TRANSCRIPTION_ALLOW_LOCAL_COMMAND"):
             raise RuntimeError("local transcription command is disabled")
         command_template = (app.config.get("NTC_TRANSCRIPTION_LOCAL_COMMAND") or "").strip()
@@ -1402,7 +1314,7 @@ def install_source_api(app, transcription_store) -> None:
         if completed.returncode != 0:
             error_text = (completed.stderr or completed.stdout or "").strip()
             raise RuntimeError(f"local transcription command failed: {error_text[:240]}")
-        return _extract_transcription_text(completed.stdout)
+        return _extract_transcription_text(completed.stdout), {}
 
     def transcribe_audio_chunk(
         wav_bytes: bytes,
@@ -1411,7 +1323,7 @@ def install_source_api(app, transcription_store) -> None:
         current_model: str,
         prompt_context: str = "",
         lane: str = "live",
-    ) -> str:
+    ) -> tuple[str, dict]:
         prompt = (app.config.get("NTC_TRANSCRIPTION_PROMPT") or "").strip()
         if prompt_context:
             prompt = "\n".join(
@@ -1483,7 +1395,7 @@ def install_source_api(app, transcription_store) -> None:
                         return
                     payload, segment_started_at, segment_ended_at = job
                     context = previous_refined_text[-refined_prompt_chars:] if refined_prompt_chars else ""
-                    text = transcribe_audio_chunk(
+                    text, inference = transcribe_audio_chunk(
                         _wav_file_bytes(
                             channels=TRANSCRIPTION_STREAM_PROFILE["channels"],
                             sample_rate_hz=TRANSCRIPTION_STREAM_PROFILE["sample_rate_hz"],
@@ -1495,6 +1407,18 @@ def install_source_api(app, transcription_store) -> None:
                         prompt_context=context,
                         lane="batch",
                     )
+                    app.logger.info(
+                        "transcription inference room_slug=%s host_slug=%s "
+                        "lane=batch model=%s device=%s audio_seconds=%s "
+                        "inference_seconds=%s queue_wait_seconds=%s",
+                        state.room_slug,
+                        state.host_slug,
+                        inference.get("model") or current_model,
+                        inference.get("device") or "",
+                        inference.get("audio_seconds") or "",
+                        inference.get("inference_seconds") or "",
+                        inference.get("queue_wait_seconds") or "",
+                    )
                     suppress_pattern = (app.config.get("NTC_TRANSCRIPTION_SUPPRESS_REGEX") or "").strip()
                     if not text or _transcription_matches_suppressed_pattern(text, suppress_pattern):
                         continue
@@ -1505,7 +1429,7 @@ def install_source_api(app, transcription_store) -> None:
                         state.room_slug,
                         host_slug=state.host_slug,
                         provider=current_provider,
-                        model=current_model,
+                        model=inference.get("model") or current_model,
                         started_at=segment_started_at.isoformat(),
                         ended_at=segment_ended_at.isoformat(),
                         received_at=_utc_now(),
@@ -1612,7 +1536,7 @@ def install_source_api(app, transcription_store) -> None:
             rms_db, _ = _chunk_signal_stats(payload, bits_per_sample=16)
             if rms_db is None or rms_db < float(app.config.get("NTC_TRANSCRIPTION_MIN_RMS_DB", -52.0)):
                 return
-            text = transcribe_audio_chunk(
+            text, inference = transcribe_audio_chunk(
                 _wav_file_bytes(
                     channels=TRANSCRIPTION_STREAM_PROFILE["channels"],
                     sample_rate_hz=TRANSCRIPTION_STREAM_PROFILE["sample_rate_hz"],
@@ -1621,6 +1545,18 @@ def install_source_api(app, transcription_store) -> None:
                 ),
                 current_provider=current_provider,
                 current_model=current_model,
+            )
+            app.logger.info(
+                "transcription inference room_slug=%s host_slug=%s "
+                "lane=live model=%s device=%s audio_seconds=%s "
+                "inference_seconds=%s queue_wait_seconds=%s",
+                state.room_slug,
+                state.host_slug,
+                inference.get("model") or current_model,
+                inference.get("device") or "",
+                inference.get("audio_seconds") or "",
+                inference.get("inference_seconds") or "",
+                inference.get("queue_wait_seconds") or "",
             )
             suppress_pattern = (app.config.get("NTC_TRANSCRIPTION_SUPPRESS_REGEX") or "").strip()
             if not text or _transcription_matches_suppressed_pattern(text, suppress_pattern):
@@ -1633,7 +1569,7 @@ def install_source_api(app, transcription_store) -> None:
                 state.room_slug,
                 host_slug=state.host_slug,
                 provider=current_provider,
-                model=current_model,
+                model=inference.get("model") or current_model,
                 started_at=segment_started_at.isoformat(),
                 ended_at=segment_ended_at.isoformat(),
                 received_at=received_at,
@@ -2040,18 +1976,6 @@ def install_source_api(app, transcription_store) -> None:
             details={"segment_id": segment_id, "marker": marker_text},
         )
         return jsonify({"ok": True, "segment_id": segment_id, "text": marker_text})
-
-    @app.post("/transcription/api/source/browser/tonevision/takeover/<host_slug>")
-    @app.post("/api/source/browser/tonevision/takeover/<host_slug>")
-    def transcription_browser_capture_tonevision_takeover(host_slug: str):
-        host = auth_host_from_request(host_slug)
-        if not host:
-            return jsonify({"error": "unauthorized"}), 403
-        try:
-            takeover = start_tonevision_takeover(host)
-        except RuntimeError as exc:
-            return jsonify({"error": str(exc)}), 500
-        return jsonify({"ok": True, **takeover})
 
     @app.post("/transcription/api/source/ingest/<host_slug>")
     @app.post("/api/source/ingest/<host_slug>")

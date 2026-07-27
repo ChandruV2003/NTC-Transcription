@@ -798,65 +798,15 @@ class TranscriptionTests(unittest.TestCase):
         self.assertIn(b"[Announcements]", response.data)
         self.assertIn(b"Custom Marker", response.data)
         self.assertIn(b"insertCustomMarker", response.data)
-        self.assertIn(b"Take ToneVision", response.data)
+        self.assertNotIn(b"ToneVision", response.data)
         self.assertIn(b"/transcription/api/source/browser/marker/", response.data)
-        self.assertIn(b"/transcription/api/source/browser/tonevision/takeover/", response.data)
+        self.assertNotIn(b"/transcription/api/source/browser/tonevision/", response.data)
         self.assertIn(b"debug-line", response.data)
         self.assertIn(b"isSecureContext", response.data)
         self.assertIn(b"Open this page in Safari", response.data)
         self.assertIn(b'const hostSlug = "iphone15pro";', response.data)
         self.assertIn(b'const token = "iphone-token";', response.data)
         self.assertNotIn(b"&#34;iphone15pro&#34;", response.data)
-
-    def test_tonevision_takeover_clears_and_starts_after_current_transcript(self):
-        from tools import tonevision_bridge
-
-        sent_payloads = []
-
-        class FakeToneVisionWebSocket:
-            def __init__(self, url, *, timeout):
-                self.url = url
-                self.timeout = timeout
-
-            def connect(self):
-                sent_payloads.append({"type": "connect"})
-
-            def send_json(self, payload):
-                sent_payloads.append(dict(payload))
-
-            def close(self):
-                sent_payloads.append({"type": "close"})
-
-        original_ws = tonevision_bridge.ToneVisionWebSocket
-        original_url = tonevision_bridge.tonevision_ws_url
-        tonevision_bridge.ToneVisionWebSocket = FakeToneVisionWebSocket
-        tonevision_bridge.tonevision_ws_url = lambda base_url, room_id, pin: "ws://tonevision.test/ws"
-        self.app.config["NTC_TONEVISION_POLL_SECONDS"] = "0.05"
-        try:
-            _insert_segment(self.db_path, "convention-laptop", "Old transcript should not replay")
-
-            response = self.client.post("/api/source/browser/tonevision/takeover/iphone15pro?token=iphone-token", json={})
-
-            self.assertEqual(response.status_code, 200)
-            deadline = time.time() + 2
-            while time.time() < deadline and not any(payload.get("type") == "text" for payload in sent_payloads):
-                time.sleep(0.02)
-            text_payloads = [payload["text"] for payload in sent_payloads if payload.get("type") == "text"]
-            self.assertEqual(text_payloads, [""])
-
-            _insert_segment(self.db_path, "convention-laptop", "Fresh transcript should appear")
-            deadline = time.time() + 2
-            while time.time() < deadline:
-                text_payloads = [payload["text"] for payload in sent_payloads if payload.get("type") == "text"]
-                if any("Fresh transcript should appear" in text for text in text_payloads):
-                    break
-                time.sleep(0.02)
-
-            self.assertTrue(any("Fresh transcript should appear" in text for text in text_payloads))
-            self.assertFalse(any("Old transcript should not replay" in text for text in text_payloads))
-        finally:
-            tonevision_bridge.ToneVisionWebSocket = original_ws
-            tonevision_bridge.tonevision_ws_url = original_url
 
     def test_browser_capture_start_rejects_bad_token(self):
         response = self.client.post(
@@ -950,6 +900,7 @@ class TranscriptionTests(unittest.TestCase):
 
         calls = []
         lanes = []
+        timeouts = []
 
         class FakeResponse:
             def __init__(self, status_code, payload):
@@ -963,9 +914,21 @@ class TranscriptionTests(unittest.TestCase):
         def fake_post(url, **kwargs):
             calls.append(url)
             lanes.append((kwargs.get("params") or {}).get("lane"))
+            timeouts.append(kwargs.get("timeout"))
             if url == "http://primary-whisper.test/transcription":
                 return FakeResponse(503, {"error": "busy"})
-            return FakeResponse(200, {"text": "backup endpoint transcript"})
+            return FakeResponse(
+                200,
+                {
+                    "text": "backup endpoint transcript",
+                    "model": "ggml-large-v3-turbo",
+                    "device": "mps",
+                    "lane": "live",
+                    "audio_seconds": 1.0,
+                    "inference_seconds": 0.4,
+                    "queue_wait_seconds": 0.0,
+                },
+            )
 
         original_post = ntc_transcription_source.requests.post
         ntc_transcription_source.requests.post = fake_post
@@ -996,6 +959,7 @@ class TranscriptionTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(lanes, ["live", "live"])
+            self.assertEqual(timeouts, [(3.0, 30.0), (3.0, 30.0)])
             with sqlite3.connect(self.db_path) as connection:
                 row = connection.execute(
                     """
@@ -1005,7 +969,16 @@ class TranscriptionTests(unittest.TestCase):
                     LIMIT 1
                     """
                 ).fetchone()
-            self.assertEqual(row, ("convention-laptop", "iphone15pro", "local_http", "local", "backup endpoint transcript"))
+            self.assertEqual(
+                row,
+                (
+                    "convention-laptop",
+                    "iphone15pro",
+                    "local_http",
+                    "ggml-large-v3-turbo",
+                    "backup endpoint transcript",
+                ),
+            )
         finally:
             ntc_transcription_source.requests.post = original_post
 
@@ -1035,9 +1008,7 @@ class TranscriptionTests(unittest.TestCase):
         self.assertIn(b"block.classList.add(\"is-marker\")", response.data)
         self.assertIn(b"[Announcements]", response.data)
 
-    def test_marker_segments_feed_public_api_and_tonevision_lines(self):
-        from tools import tonevision_bridge
-
+    def test_marker_segments_feed_public_api(self):
         self.app.config["NTC_TRANSCRIPTION_VISIBLE_ROOMS"] = "room-a,room-b,convention-laptop"
         before_id = _insert_segment(self.db_path, "convention-laptop", "Before marker", received_at="2026-05-24T20:00:00+00:00")
         marker_id = _insert_segment(self.db_path, "convention-laptop", "[Announcements]", received_at="2026-05-24T20:00:01+00:00")
@@ -1051,9 +1022,6 @@ class TranscriptionTests(unittest.TestCase):
         ids = [segment["id"] for segment in payload["segments"]]
         self.assertEqual(ids[-3:], [before_id, marker_id, after_id])
         self.assertEqual(texts[-3:], ["Before marker", "[Announcements]", "After marker"])
-
-        tonevision_text = tonevision_bridge.trim_buffer(texts[-3:], 60000)
-        self.assertEqual(tonevision_text, "Before marker\n[Announcements]\nAfter marker")
 
     def test_settings_collapses_multiple_hosts_per_room(self):
         with sqlite3.connect(self.db_path) as connection:

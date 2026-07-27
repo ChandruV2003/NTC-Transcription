@@ -4,7 +4,7 @@ Public transcription display and private source controls for NTC Newark.
 
 This service is intentionally separate from WebCall and the internal Translator control panel. `/transcription` is the public display surface. `/transcription/settings` is the private control surface for choosing the active source, monitoring source-agent health, viewing transcript sessions, and managing translation output where configured.
 
-Only one visible transcription source should be active at a time. The current source set is Room A, Room B, and the convention laptop. Room A and Room B can still be started by WebCall meeting automation, but transcription audio is not tapped from the WebCall process. Source agents send audio directly to NTC Transcription, which delegates speech recognition to the configured Whisper backend.
+Only one visible transcription source should be active at a time. The current source set is Room A, Room B, and portable Room C. Room A and Room B can still be started by WebCall meeting automation, but transcription audio is not tapped from the WebCall process. Source agents send audio directly to NTC Transcription, which delegates speech recognition to the configured Whisper backend.
 
 ## Runtime
 
@@ -24,7 +24,8 @@ Only one visible transcription source should be active at a time. The current so
 
 `/transcription` renders the configured default room from `NTC_TRANSCRIPTION_DEFAULT_ROOM`.
 Room aliases include `room-a`, `room-b`, and `convention`, which maps to the
-`convention-laptop` room. The legacy `/transcribe` page URLs redirect to
+`convention-laptop` remains Room C's internal compatibility slug so historical
+transcripts, agents, and foreign keys remain valid. The legacy `/transcribe` page URLs redirect to
 `/transcription`, and the legacy public API path remains available as a
 compatibility alias. The APIs return only the recent live transcription window and
 are not transcript archives. The internal API is for the `NTC-Translator`
@@ -44,24 +45,6 @@ source worker used by the native agents. NTC Transcription still delegates speec
 recognition to the configured Whisper backend; the phone is only an audio tap
 point. While a browser source is active for Room C, other Room C source agents
 are rejected so microphones are not mixed together.
-
-## ToneVision Bridge
-
-ToneVision can receive text through its transmitter websocket. The bridge tool
-publishes NTC Transcription segments into a ToneVision room without browser
-screen scraping:
-
-```bash
-python3 tools/tonevision_bridge.py \
-  --tonevision-base-url http://100.96.175.75:8080 \
-  --tonevision-room english \
-  --tonevision-pin '<room-pin>' \
-  --tonevision-admin-password '<admin-password>'
-```
-
-By default the bridge starts at the current transcription tail, so it only sends
-new segments. It also refuses to connect when ToneVision reports that a human
-typist is already active, unless `--force-takeover` is passed deliberately.
 
 ## Local Validation
 
@@ -108,8 +91,11 @@ song/lyric matching, or explicit model fine-tuning.
 ## Local Whisper Workers
 
 The Ubuntu Mac Pro whisper.cpp/Vulkan worker is the primary NTC inference host.
-It reserves D700 GPU 0 for the low-latency `large-v3-turbo` live lane and D700
-GPU 1 for full `large-v3` recorder and refinement work. The bridge routes
+Measured performance reserves Vulkan GPU 1 for the low-latency
+`large-v3-turbo` live lane and Vulkan GPU 0 for full `large-v3` recorder and
+refinement work. The full model wakes on the first batch request, temporarily
+yields GPU 0 from the NTC Agent language model, and returns the GPU after 120
+idle seconds. The bridge routes
 requests over 30 seconds, plus explicitly marked refinement requests, to the
 bounded batch lane so recorder processing cannot block rolling speech.
 The Apple Silicon M4 Max MacBook worker is retained as fallback capacity only;
@@ -122,7 +108,7 @@ python3 tools/whisper_large_server.py \
   --host 0.0.0.0 \
   --port 8766 \
   --model openai/whisper-large-v3 \
-  --device cpu \
+  --device mps \
   --quiet
 ```
 
@@ -158,17 +144,18 @@ Useful hardening knobs:
 
 ### Mac Pro whisper.cpp worker
 
-The Ubuntu Mac Pro uses persistent Vulkan-backed whisper.cpp servers on
-loopback ports `8769` (live) and `8767` (batch). The compatibility bridge
-exposes the same raw-WAV contract on port `8766`, so existing NTC callers only
-need a host-address change.
+The Ubuntu Mac Pro uses a persistent Vulkan-backed whisper.cpp live server on
+loopback port `8769` and a managed batch server on `8767`. The compatibility
+bridge exposes the same raw-WAV contract on port `8766`, so existing NTC callers
+only need a host-address change.
 
 Install the user units from `ops/linux` under
-`~/.config/systemd/user`, then enable all three:
+`~/.config/systemd/user`, enable the live server and bridge, and leave the
+batch server under bridge lifecycle control:
 
 ```bash
 systemctl --user enable --now ntc-whisper-live-backend.service
-systemctl --user enable --now ntc-whisper-cpp-backend.service
+systemctl --user disable --now ntc-whisper-cpp-backend.service
 systemctl --user enable --now ntc-whisper-bridge.service
 ```
 

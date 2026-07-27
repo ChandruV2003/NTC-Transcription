@@ -9,6 +9,7 @@ import urllib.request
 import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 from tools.whisper_cpp_bridge import (
     WhisperBridgeHandler,
@@ -178,7 +179,38 @@ class WhisperCppBridgeTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 400)
         raised.exception.close()
 
-    def test_backend_unit_waits_for_second_amd_vulkan_device(self):
+    def test_managed_batch_client_stops_conflict_and_starts_backend(self):
+        backend_port = self.backend.server_address[1]
+        client = WhisperCppClient(
+            backend_url=f"http://127.0.0.1:{backend_port}/inference",
+            backend_timeout_seconds=2,
+            model="ggml-large-v3",
+            device="vulkan:0",
+            managed_service="ntc-whisper-cpp-backend.service",
+            conflicting_service="ntc-agent-llm.service",
+            service_idle_seconds=0,
+        )
+
+        with (
+            mock.patch.object(client, "ready", side_effect=[False, True]),
+            mock.patch.object(client, "_systemctl") as systemctl,
+        ):
+            payload = client.transcribe(
+                _wav_bytes(),
+                language="en",
+                prompt="",
+            )
+
+        self.assertEqual(payload["text"], "Bridge transcript.")
+        self.assertEqual(
+            systemctl.call_args_list,
+            [
+                mock.call("stop", "ntc-agent-llm.service"),
+                mock.call("start", "ntc-whisper-cpp-backend.service"),
+            ],
+        )
+
+    def test_batch_backend_unit_uses_display_gpu_and_conflicts_with_agent(self):
         unit = (
             Path(__file__).resolve().parent
             / "ops/linux/ntc-whisper-cpp-backend.service"
@@ -186,9 +218,11 @@ class WhisperCppBridgeTests(unittest.TestCase):
 
         self.assertIn("ExecStartPre=", unit)
         self.assertIn("vulkaninfo --summary", unit)
-        self.assertIn('"^GPU1:"', unit)
+        self.assertIn('"^GPU0:"', unit)
         self.assertIn('"deviceName.*AMD Radeon"', unit)
+        self.assertIn("Conflicts=ntc-agent-llm.service", unit)
         self.assertIn("TimeoutStartSec=120", unit)
+        self.assertNotIn("--convert", unit)
         self.assertNotIn("-p 2", unit)
 
     def test_bridge_unit_reserves_live_and_batch_lanes(self):
@@ -202,8 +236,23 @@ class WhisperCppBridgeTests(unittest.TestCase):
         self.assertIn("--batch-threshold-seconds 30", unit)
         self.assertIn("--max-queued-requests 2", unit)
         self.assertIn("--max-batch-queued-requests 1", unit)
+        self.assertIn(
+            "--batch-service ntc-whisper-cpp-backend.service",
+            unit,
+        )
+        self.assertIn(
+            "--batch-conflicting-service ntc-agent-llm.service",
+            unit,
+        )
         self.assertIn("--model ggml-large-v3-turbo", unit)
         self.assertIn("--batch-model ggml-large-v3", unit)
+        self.assertIn("--device vulkan:1", unit)
+        self.assertIn("--batch-device vulkan:0", unit)
+        self.assertNotIn(
+            "Requires=ntc-whisper-live-backend.service "
+            "ntc-whisper-cpp-backend.service",
+            unit,
+        )
 
         source = (
             Path(__file__).resolve().parent / "ntc_transcription_source.py"
@@ -214,9 +263,10 @@ class WhisperCppBridgeTests(unittest.TestCase):
             Path(__file__).resolve().parent
             / "ops/linux/ntc-whisper-live-backend.service"
         ).read_text(encoding="utf-8")
-        self.assertIn('"^GPU0:"', live_unit)
+        self.assertIn('"^GPU1:"', live_unit)
         self.assertIn("ggml-large-v3-turbo.bin", live_unit)
         self.assertIn("--port 8769", live_unit)
+        self.assertNotIn("--convert", live_unit)
 
 
 if __name__ == "__main__":
