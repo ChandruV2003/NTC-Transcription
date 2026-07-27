@@ -1,0 +1,21 @@
+[Unit]
+Description=NTC Whisper.cpp Large-v3 Turbo live backend
+After=network-online.target ntc-agent-llm.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/benchmarks/whisper.cpp
+ExecStartPre=/bin/sh -c 'until /usr/bin/vulkaninfo --summary 2>/dev/null | /usr/bin/grep -A 8 "^GPU0:" | /usr/bin/grep -q "deviceName.*AMD Radeon"; do /usr/bin/sleep 2; done'
+ExecStart=%h/benchmarks/whisper.cpp/build-macpro-vulkan/bin/whisper-server --host 127.0.0.1 --port 8769 -dev 0 -t 12 -m %h/benchmarks/whisper.cpp/models/ggml-large-v3-turbo.bin --convert --tmp-dir %t/ntc-whisper-live
+Restart=always
+RestartSec=5
+TimeoutStartSec=120
+RuntimeDirectory=ntc-whisper-live
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=default.target

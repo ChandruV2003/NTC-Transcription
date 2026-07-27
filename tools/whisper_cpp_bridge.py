@@ -45,6 +45,7 @@ def _multipart_body(
     *,
     language: str,
     prompt: str,
+    fast_mode: bool,
 ) -> tuple[bytes, str]:
     boundary = f"ntc-whisper-{uuid.uuid4().hex}"
     chunks: list[bytes] = []
@@ -61,6 +62,9 @@ def _multipart_body(
 
     add_field("response_format", "json")
     add_field("temperature", "0.0")
+    add_field("temperature_inc", "0.0" if fast_mode else "0.2")
+    if fast_mode:
+        add_field("no_timestamps", "true")
     if language:
         add_field("language", language)
     if prompt:
@@ -87,11 +91,13 @@ class WhisperCppClient:
         backend_timeout_seconds: float,
         model: str,
         device: str,
+        fast_mode: bool = False,
     ):
         self.backend_url = backend_url
         self.backend_timeout_seconds = backend_timeout_seconds
         self.model = model
         self.device = device
+        self.fast_mode = fast_mode
         self.lock = threading.Lock()
 
     def ready(self) -> bool:
@@ -107,6 +113,7 @@ class WhisperCppClient:
             wav_bytes,
             language=language,
             prompt=prompt,
+            fast_mode=self.fast_mode,
         )
         request = urllib.request.Request(
             self.backend_url,
@@ -513,6 +520,14 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--batch-model",
+        default=os.getenv("NTC_WHISPER_BATCH_MODEL", ""),
+    )
+    parser.add_argument(
+        "--batch-device",
+        default=os.getenv("NTC_WHISPER_BATCH_DEVICE", ""),
+    )
+    parser.add_argument(
         "--model",
         default=os.getenv("NTC_WHISPER_MODEL", "ggml-large-v3"),
     )
@@ -579,6 +594,7 @@ def main() -> int:
         backend_timeout_seconds=max(1.0, args.backend_timeout_seconds),
         model=args.model,
         device=args.device,
+        fast_mode=bool(args.batch_backend_url),
     )
     batch_client = None
     if args.batch_backend_url:
@@ -588,8 +604,8 @@ def main() -> int:
                 1.0,
                 args.batch_backend_timeout_seconds,
             ),
-            model=args.model,
-            device=args.device,
+            model=args.batch_model or args.model,
+            device=args.batch_device or args.device,
         )
     server = WhisperBridgeServer(
         (args.host, args.port),
@@ -612,7 +628,9 @@ def main() -> int:
         f"NTC Whisper.cpp bridge listening on "
         f"http://{args.host}:{args.port}/transcription "
         f"backend={args.backend_url} batch_backend={args.batch_backend_url or 'disabled'} "
-        f"model={args.model} device={args.device}",
+        f"model={args.model} device={args.device} "
+        f"batch_model={args.batch_model or args.model} "
+        f"batch_device={args.batch_device or args.device}",
         flush=True,
     )
     server.serve_forever()

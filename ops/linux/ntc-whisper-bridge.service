@@ -1,13 +1,13 @@
 [Unit]
 Description=NTC Whisper raw-WAV compatibility bridge
-After=network-online.target ntc-whisper-cpp-backend.service
+After=network-online.target ntc-whisper-live-backend.service ntc-whisper-cpp-backend.service
 Wants=network-online.target
-Requires=ntc-whisper-cpp-backend.service
+Requires=ntc-whisper-live-backend.service ntc-whisper-cpp-backend.service
 
 [Service]
 Type=simple
 WorkingDirectory=%h/apps/NTC-Transcription
-ExecStart=/usr/bin/python3 %h/apps/NTC-Transcription/tools/whisper_cpp_bridge.py --host 0.0.0.0 --port 8766 --backend-url http://127.0.0.1:8767/inference --backend-timeout-seconds 60 --batch-backend-url http://127.0.0.1:8767/inference --batch-backend-timeout-seconds 300 --batch-threshold-seconds 30 --max-queued-requests 2 --queue-timeout-seconds 8 --max-batch-queued-requests 1 --batch-queue-timeout-seconds 1 --model ggml-large-v3 --device vulkan:1 --quiet
+ExecStart=/usr/bin/python3 %h/apps/NTC-Transcription/tools/whisper_cpp_bridge.py --host 0.0.0.0 --port 8766 --backend-url http://127.0.0.1:8769/inference --backend-timeout-seconds 45 --batch-backend-url http://127.0.0.1:8767/inference --batch-backend-timeout-seconds 300 --batch-threshold-seconds 30 --max-queued-requests 2 --queue-timeout-seconds 8 --max-batch-queued-requests 1 --batch-queue-timeout-seconds 1 --model ggml-large-v3-turbo --device vulkan:0 --batch-model ggml-large-v3 --batch-device vulkan:1 --quiet
 Restart=always
 RestartSec=5
 NoNewPrivileges=true

@@ -189,7 +189,7 @@ class WhisperCppBridgeTests(unittest.TestCase):
         self.assertIn('"^GPU1:"', unit)
         self.assertIn('"deviceName.*AMD Radeon"', unit)
         self.assertIn("TimeoutStartSec=120", unit)
-        self.assertIn("-p 2", unit)
+        self.assertNotIn("-p 2", unit)
 
     def test_bridge_unit_reserves_live_and_batch_lanes(self):
         unit = (
@@ -197,15 +197,26 @@ class WhisperCppBridgeTests(unittest.TestCase):
             / "ops/linux/ntc-whisper-bridge.service"
         ).read_text(encoding="utf-8")
 
+        self.assertIn("--backend-url http://127.0.0.1:8769/inference", unit)
         self.assertIn("--batch-backend-url http://127.0.0.1:8767/inference", unit)
         self.assertIn("--batch-threshold-seconds 30", unit)
         self.assertIn("--max-queued-requests 2", unit)
         self.assertIn("--max-batch-queued-requests 1", unit)
+        self.assertIn("--model ggml-large-v3-turbo", unit)
+        self.assertIn("--batch-model ggml-large-v3", unit)
 
         source = (
             Path(__file__).resolve().parent / "ntc_transcription_source.py"
         ).read_text(encoding="utf-8")
         self.assertIn('lane="batch"', source)
+
+        live_unit = (
+            Path(__file__).resolve().parent
+            / "ops/linux/ntc-whisper-live-backend.service"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"^GPU0:"', live_unit)
+        self.assertIn("ggml-large-v3-turbo.bin", live_unit)
+        self.assertIn("--port 8769", live_unit)
 
 
 if __name__ == "__main__":

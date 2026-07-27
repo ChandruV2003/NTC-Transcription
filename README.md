@@ -108,6 +108,10 @@ song/lyric matching, or explicit model fine-tuning.
 ## Local Whisper Workers
 
 The Ubuntu Mac Pro whisper.cpp/Vulkan worker is the primary NTC inference host.
+It reserves D700 GPU 0 for the low-latency `large-v3-turbo` live lane and D700
+GPU 1 for full `large-v3` recorder and refinement work. The bridge routes
+requests over 30 seconds, plus explicitly marked refinement requests, to the
+bounded batch lane so recorder processing cannot block rolling speech.
 The Apple Silicon M4 Max MacBook worker is retained as fallback capacity only;
 the M4 Mac mini remains dedicated to JVT workloads.
 
@@ -154,15 +158,16 @@ Useful hardening knobs:
 
 ### Mac Pro whisper.cpp worker
 
-The Ubuntu Mac Pro uses a persistent Vulkan-backed whisper.cpp server on
-loopback port `8767`. `tools/whisper_cpp_bridge.py` exposes the same raw-WAV
-contract on port `8766`, so existing NTC callers only need a host-address
-change.
+The Ubuntu Mac Pro uses persistent Vulkan-backed whisper.cpp servers on
+loopback ports `8769` (live) and `8767` (batch). The compatibility bridge
+exposes the same raw-WAV contract on port `8766`, so existing NTC callers only
+need a host-address change.
 
 Install the user units from `ops/linux` under
-`~/.config/systemd/user`, then enable both:
+`~/.config/systemd/user`, then enable all three:
 
 ```bash
+systemctl --user enable --now ntc-whisper-live-backend.service
 systemctl --user enable --now ntc-whisper-cpp-backend.service
 systemctl --user enable --now ntc-whisper-bridge.service
 ```
@@ -170,6 +175,7 @@ systemctl --user enable --now ntc-whisper-bridge.service
 The backend expects the reviewed Mac Pro build and model at:
 
 - `~/benchmarks/whisper.cpp/build-macpro-vulkan/bin/whisper-server`
+- `~/benchmarks/whisper.cpp/models/ggml-large-v3-turbo.bin`
 - `~/benchmarks/whisper.cpp/models/ggml-large-v3.bin`
 
 The whisper.cpp server stays bound to `127.0.0.1`; only the compatibility
