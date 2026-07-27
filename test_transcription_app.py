@@ -6,7 +6,7 @@ import math
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ntc_transcription_app import create_app
+from ntc_transcription_app import TranscriptionStore, create_app
 
 
 def _create_test_db(path: Path):
@@ -213,6 +213,15 @@ class TranscriptionTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.get_json()["ok"])
+
+    def test_store_context_closes_database_connection(self):
+        store = TranscriptionStore(str(self.db_path))
+
+        with store._connect(readonly=True) as connection:
+            self.assertEqual(connection.execute("SELECT 1").fetchone()[0], 1)
+
+        with self.assertRaises(sqlite3.ProgrammingError):
+            connection.execute("SELECT 1")
 
     def test_public_page_is_transcript_only(self):
         _insert_segment(self.db_path, "room-a", "Public transcription line.")

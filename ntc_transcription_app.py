@@ -88,6 +88,15 @@ def _source_status(transcription_enabled: bool, source_requested: bool, source_i
     return "Idle", "bad"
 
 
+class ClosingSQLiteConnection(sqlite3.Connection):
+    """Commit or roll back like sqlite3.Connection, then close the handle."""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        suppress = super().__exit__(exc_type, exc_value, traceback)
+        self.close()
+        return suppress
+
+
 class TranscriptionStore:
     def __init__(self, db_path: str | None):
         self.db_path = Path(db_path or "/app/data/ntccast.db")
@@ -100,9 +109,18 @@ class TranscriptionStore:
     def _connect(self, *, readonly: bool = True):
         if readonly:
             uri = f"file:{self.db_path}?mode=ro"
-            connection = sqlite3.connect(uri, uri=True, timeout=5)
+            connection = sqlite3.connect(
+                uri,
+                uri=True,
+                timeout=5,
+                factory=ClosingSQLiteConnection,
+            )
         else:
-            connection = sqlite3.connect(self.db_path, timeout=5)
+            connection = sqlite3.connect(
+                self.db_path,
+                timeout=5,
+                factory=ClosingSQLiteConnection,
+            )
         connection.row_factory = sqlite3.Row
         return connection
 
