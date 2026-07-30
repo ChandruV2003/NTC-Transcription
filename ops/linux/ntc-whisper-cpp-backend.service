@@ -12,6 +12,7 @@ ExecStart=%h/benchmarks/whisper.cpp/build-macpro-vulkan/bin/whisper-server --hos
 Restart=always
 RestartSec=5
 TimeoutStartSec=120
+TimeoutStopSec=2
 RuntimeDirectory=ntc-whisper
 NoNewPrivileges=true
 PrivateTmp=true

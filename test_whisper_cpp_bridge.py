@@ -291,6 +291,7 @@ class WhisperCppBridgeTests(unittest.TestCase):
         self.assertIn("-dev 1", unit)
         self.assertIn("Conflicts=ntc-agent-llm.service", unit)
         self.assertIn("TimeoutStartSec=120", unit)
+        self.assertIn("TimeoutStopSec=2", unit)
         self.assertNotIn("--convert", unit)
         self.assertNotIn("-p 2", unit)
 
