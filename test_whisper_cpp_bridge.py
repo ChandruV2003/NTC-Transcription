@@ -278,6 +278,27 @@ class WhisperCppBridgeTests(unittest.TestCase):
             ],
         )
 
+    def test_managed_batch_stop_clears_forced_stop_failure_state(self):
+        backend_port = self.backend.server_address[1]
+        client = WhisperCppClient(
+            backend_url=f"http://127.0.0.1:{backend_port}/inference",
+            backend_timeout_seconds=2,
+            model="ggml-large-v3",
+            device="vulkan:1",
+            managed_service="ntc-whisper-cpp-backend.service",
+        )
+
+        with mock.patch.object(client, "_systemctl") as systemctl:
+            client.stop_managed_service()
+
+        self.assertEqual(
+            systemctl.call_args_list,
+            [
+                mock.call("stop", "ntc-whisper-cpp-backend.service"),
+                mock.call("reset-failed", "ntc-whisper-cpp-backend.service"),
+            ],
+        )
+
     def test_batch_backend_unit_uses_compute_gpu_and_conflicts_with_agent(self):
         unit = (
             Path(__file__).resolve().parent

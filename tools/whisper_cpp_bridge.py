@@ -175,7 +175,7 @@ class WhisperCppClient:
                 return
             self.idle_timer = None
             try:
-                self._systemctl("stop", self.managed_service)
+                self.stop_managed_service()
                 if self.conflicting_service:
                     self._systemctl("start", self.conflicting_service)
             except Exception as exc:
@@ -216,8 +216,21 @@ class WhisperCppClient:
             return False
 
     def stop_managed_service(self) -> None:
-        if self.managed:
+        if not self.managed:
+            return
+        stop_error = None
+        try:
             self._systemctl("stop", self.managed_service)
+        except Exception as exc:
+            stop_error = exc
+        try:
+            self._systemctl("reset-failed", self.managed_service)
+        except Exception:
+            if stop_error is not None:
+                raise stop_error
+            raise
+        if stop_error is not None and self.ready():
+            raise stop_error
 
     def transcribe(self, wav_bytes: bytes, *, language: str, prompt: str) -> dict:
         with self.lock:
@@ -307,6 +320,7 @@ class WhisperBridgeServer(ThreadingHTTPServer):
         self.batch_inhibit_reason = "unchecked"
         self.batch_stop_lock = threading.Lock()
         self.batch_stop_active = False
+        self.batch_stop_latched = False
         self.api_token = api_token
         self.lane_limits = {
             "live": self.max_queued_requests,
@@ -439,15 +453,18 @@ class WhisperBridgeServer(ThreadingHTTPServer):
         if self.batch_client is None or not self.batch_client.managed:
             return
         with self.batch_stop_lock:
-            if self.batch_stop_active:
+            if self.batch_stop_active or self.batch_stop_latched:
                 return
             self.batch_stop_active = True
+            self.batch_stop_latched = True
 
         def stop() -> None:
             try:
                 self.batch_client.stop_managed_service()
             except Exception as exc:
                 print(f"managed Whisper inhibit stop failed: {exc}", flush=True)
+                with self.batch_stop_lock:
+                    self.batch_stop_latched = False
             finally:
                 with self.batch_stop_lock:
                     self.batch_stop_active = False
@@ -458,6 +475,9 @@ class WhisperBridgeServer(ThreadingHTTPServer):
         inhibited, reason = self.batch_inhibit_state()
         if inhibited:
             self.stop_batch_backend()
+        else:
+            with self.batch_stop_lock:
+                self.batch_stop_latched = False
         return inhibited, reason
 
     def _monitor_batch_inhibit(self) -> None:
