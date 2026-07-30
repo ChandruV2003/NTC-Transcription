@@ -30,6 +30,7 @@ DEFAULT_BATCH_QUEUE_TIMEOUT_SECONDS = 1.0
 DEFAULT_BATCH_BACKEND_TIMEOUT_SECONDS = 300.0
 DEFAULT_BATCH_START_TIMEOUT_SECONDS = 45.0
 DEFAULT_BATCH_IDLE_SECONDS = 120.0
+DEFAULT_BATCH_INHIBIT_CACHE_SECONDS = 1.0
 SYSTEMD_SERVICE_PATTERN = re.compile(r"^[A-Za-z0-9_.@:-]+\.service$")
 
 
@@ -214,6 +215,10 @@ class WhisperCppClient:
         except (OSError, urllib.error.URLError):
             return False
 
+    def stop_managed_service(self) -> None:
+        if self.managed:
+            self._systemctl("stop", self.managed_service)
+
     def transcribe(self, wav_bytes: bytes, *, language: str, prompt: str) -> dict:
         with self.lock:
             self._cancel_idle_stop()
@@ -270,6 +275,8 @@ class WhisperBridgeServer(ThreadingHTTPServer):
         batch_threshold_seconds: float = DEFAULT_BATCH_THRESHOLD_SECONDS,
         max_batch_queued_requests: int = DEFAULT_MAX_BATCH_QUEUED_REQUESTS,
         batch_queue_timeout_seconds: float = DEFAULT_BATCH_QUEUE_TIMEOUT_SECONDS,
+        batch_inhibit_url: str = "",
+        batch_inhibit_cache_seconds: float = DEFAULT_BATCH_INHIBIT_CACHE_SECONDS,
     ):
         super().__init__(server_address, handler_cls)
         self.client = client
@@ -289,6 +296,17 @@ class WhisperBridgeServer(ThreadingHTTPServer):
             0.0,
             float(batch_queue_timeout_seconds),
         )
+        self.batch_inhibit_url = str(batch_inhibit_url or "").strip()
+        self.batch_inhibit_cache_seconds = max(
+            0.0,
+            float(batch_inhibit_cache_seconds),
+        )
+        self.batch_inhibit_lock = threading.Lock()
+        self.batch_inhibit_checked_at = 0.0
+        self.batch_inhibit_last = False
+        self.batch_inhibit_reason = "unchecked"
+        self.batch_stop_lock = threading.Lock()
+        self.batch_stop_active = False
         self.api_token = api_token
         self.lane_limits = {
             "live": self.max_queued_requests,
@@ -330,6 +348,8 @@ class WhisperBridgeServer(ThreadingHTTPServer):
                 "failed_requests": self.failed_requests,
                 "rejected_requests": self.rejected_requests,
                 "batch_threshold_seconds": self.batch_threshold_seconds,
+                "batch_inhibited": self.batch_inhibit_last,
+                "batch_inhibit_reason": self.batch_inhibit_reason,
                 "lanes": {
                     lane: {
                         **values,
@@ -339,6 +359,86 @@ class WhisperBridgeServer(ThreadingHTTPServer):
                     for lane, values in self.lane_stats.items()
                 },
             }
+
+    @staticmethod
+    def _activity_inhibits_batch(payload: dict) -> tuple[bool, str]:
+        if bool((payload.get("webcall") or {}).get("live")):
+            return True, "webcall_live"
+
+        analysis = ((payload.get("mix") or {}).get("analysis") or {})
+        try:
+            rms_dbfs = float(analysis.get("rms_dbfs"))
+        except (TypeError, ValueError):
+            rms_dbfs = -90.0
+        try:
+            peak_dbfs = float(analysis.get("peak_dbfs"))
+        except (TypeError, ValueError):
+            peak_dbfs = -90.0
+        if rms_dbfs > -78.0 or peak_dbfs > -68.0:
+            return True, "program_audio"
+
+        amplifiers = (payload.get("operations") or {}).get("ikon_amplifiers") or []
+        for amplifier in amplifiers:
+            state = str(amplifier.get("state") or "").lower()
+            if amplifier.get("protocol_ok") and state == "operational":
+                return True, "amplifier_operational"
+        return False, "idle"
+
+    def batch_inhibit_state(self) -> tuple[bool, str]:
+        if not self.batch_inhibit_url:
+            return False, "disabled"
+        now = time.monotonic()
+        if (
+            self.batch_inhibit_checked_at
+            and now - self.batch_inhibit_checked_at
+            < self.batch_inhibit_cache_seconds
+        ):
+            return self.batch_inhibit_last, self.batch_inhibit_reason
+        with self.batch_inhibit_lock:
+            now = time.monotonic()
+            if (
+                self.batch_inhibit_checked_at
+                and now - self.batch_inhibit_checked_at
+                < self.batch_inhibit_cache_seconds
+            ):
+                return self.batch_inhibit_last, self.batch_inhibit_reason
+            try:
+                with urllib.request.urlopen(
+                    self.batch_inhibit_url,
+                    timeout=1.0,
+                ) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                inhibited, reason = self._activity_inhibits_batch(payload)
+            except (OSError, ValueError, urllib.error.URLError):
+                inhibited, reason = True, "activity_unavailable"
+            self.batch_inhibit_last = inhibited
+            self.batch_inhibit_reason = reason
+            self.batch_inhibit_checked_at = time.monotonic()
+            return inhibited, reason
+
+    def stop_batch_backend(self) -> None:
+        if self.batch_client is None or not self.batch_client.managed:
+            return
+        with self.batch_stop_lock:
+            if self.batch_stop_active:
+                return
+            self.batch_stop_active = True
+
+        def stop() -> None:
+            try:
+                self.batch_client.stop_managed_service()
+            except Exception as exc:
+                print(f"managed Whisper inhibit stop failed: {exc}", flush=True)
+            finally:
+                with self.batch_stop_lock:
+                    self.batch_stop_active = False
+
+        threading.Thread(target=stop, daemon=True).start()
+
+    def record_rejection(self, lane: str) -> None:
+        with self.stats_lock:
+            self.rejected_requests += 1
+            self.lane_stats[lane]["rejected_requests"] += 1
 
     def select_lane(
         self,
@@ -507,6 +607,22 @@ class WhisperBridgeHandler(BaseHTTPRequestHandler):
 
         requested_lane = str(query.get("lane", [""])[0]).strip().lower()
         lane = self.server.select_lane(audio_seconds, requested_lane)
+        if lane == "batch":
+            batch_inhibited, inhibit_reason = self.server.batch_inhibit_state()
+            if batch_inhibited:
+                self.server.record_rejection(lane)
+                self.server.stop_batch_backend()
+                self._send_json(
+                    {
+                        "error": "batch transcription deferred while live systems are active",
+                        "lane": lane,
+                        "reason": inhibit_reason,
+                        "request_id": request_id,
+                        "retryable": True,
+                    },
+                    status=429,
+                )
+                return
         client = self.server.client_for(lane)
         with self.server.request_slot(lane) as (accepted, queue_wait_seconds):
             if not accepted:
@@ -674,6 +790,20 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--batch-inhibit-url",
+        default=os.getenv("NTC_WHISPER_BATCH_INHIBIT_URL", ""),
+    )
+    parser.add_argument(
+        "--batch-inhibit-cache-seconds",
+        type=float,
+        default=float(
+            os.getenv(
+                "NTC_WHISPER_BATCH_INHIBIT_CACHE_SECONDS",
+                str(DEFAULT_BATCH_INHIBIT_CACHE_SECONDS),
+            )
+        ),
+    )
+    parser.add_argument(
         "--model",
         default=os.getenv("NTC_WHISPER_MODEL", "ggml-large-v3"),
     )
@@ -778,6 +908,11 @@ def main() -> int:
         batch_queue_timeout_seconds=max(
             0.0,
             args.batch_queue_timeout_seconds,
+        ),
+        batch_inhibit_url=args.batch_inhibit_url,
+        batch_inhibit_cache_seconds=max(
+            0.0,
+            args.batch_inhibit_cache_seconds,
         ),
     )
     print(

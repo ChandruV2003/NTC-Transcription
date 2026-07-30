@@ -165,6 +165,74 @@ class WhisperCppBridgeTests(unittest.TestCase):
         self.assertEqual(payload["audio_seconds"], 2.0)
         self.assertEqual(payload["lane"], "batch")
 
+    def test_batch_is_deferred_when_webcall_is_live(self):
+        with (
+            mock.patch.object(
+                self.bridge,
+                "batch_inhibit_state",
+                return_value=(True, "webcall_live"),
+            ),
+            self.assertRaises(urllib.error.HTTPError) as raised,
+        ):
+            self._request(
+                "/transcription?language=en&lane=batch",
+                data=_wav_bytes(2.0),
+            )
+
+        self.assertEqual(raised.exception.code, 429)
+        payload = json.loads(raised.exception.read())
+        self.assertEqual(payload["lane"], "batch")
+        self.assertEqual(payload["reason"], "webcall_live")
+        self.assertTrue(payload["retryable"])
+        raised.exception.close()
+
+    def test_live_lane_does_not_poll_batch_gate(self):
+        with mock.patch.object(
+            self.bridge,
+            "batch_inhibit_state",
+            side_effect=AssertionError("live lane must bypass batch gate"),
+        ):
+            status, payload = self._request(
+                "/transcription?language=en&lane=live",
+                data=_wav_bytes(2.0),
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["lane"], "live")
+
+    def test_batch_gate_fails_closed_when_activity_status_is_unavailable(self):
+        self.bridge.batch_inhibit_url = "http://operations.test/status"
+        self.bridge.batch_inhibit_cache_seconds = 0
+
+        with mock.patch(
+            "urllib.request.urlopen",
+            side_effect=urllib.error.URLError("offline"),
+        ):
+            inhibited, reason = self.bridge.batch_inhibit_state()
+
+        self.assertTrue(inhibited)
+        self.assertEqual(reason, "activity_unavailable")
+
+    def test_batch_gate_recognizes_program_audio_and_operational_arrays(self):
+        self.assertEqual(
+            self.bridge._activity_inhibits_batch(
+                {"mix": {"analysis": {"rms_dbfs": -60, "peak_dbfs": -50}}}
+            ),
+            (True, "program_audio"),
+        )
+        self.assertEqual(
+            self.bridge._activity_inhibits_batch(
+                {
+                    "operations": {
+                        "ikon_amplifiers": [
+                            {"protocol_ok": True, "state": "operational"}
+                        ]
+                    }
+                }
+            ),
+            (True, "amplifier_operational"),
+        )
+
     def test_stats_requires_token(self):
         with self.assertRaises(urllib.error.HTTPError) as raised:
             self._request("/stats", token=False)
@@ -234,6 +302,11 @@ class WhisperCppBridgeTests(unittest.TestCase):
         self.assertIn("--backend-url http://127.0.0.1:8769/inference", unit)
         self.assertIn("--batch-backend-url http://127.0.0.1:8767/inference", unit)
         self.assertIn("--batch-threshold-seconds 30", unit)
+        self.assertIn(
+            "--batch-inhibit-url http://127.0.0.1:1986/api/operations/status",
+            unit,
+        )
+        self.assertIn("--batch-inhibit-cache-seconds 1", unit)
         self.assertIn("--max-queued-requests 2", unit)
         self.assertIn("--max-batch-queued-requests 1", unit)
         self.assertIn(
