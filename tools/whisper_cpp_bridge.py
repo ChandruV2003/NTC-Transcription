@@ -31,6 +31,7 @@ DEFAULT_BATCH_BACKEND_TIMEOUT_SECONDS = 300.0
 DEFAULT_BATCH_START_TIMEOUT_SECONDS = 45.0
 DEFAULT_BATCH_IDLE_SECONDS = 120.0
 DEFAULT_BATCH_INHIBIT_CACHE_SECONDS = 1.0
+DEFAULT_BATCH_ACTIVITY_HOLD_SECONDS = 1800.0
 SYSTEMD_SERVICE_PATTERN = re.compile(r"^[A-Za-z0-9_.@:-]+\.service$")
 
 
@@ -290,6 +291,7 @@ class WhisperBridgeServer(ThreadingHTTPServer):
         batch_queue_timeout_seconds: float = DEFAULT_BATCH_QUEUE_TIMEOUT_SECONDS,
         batch_inhibit_url: str = "",
         batch_inhibit_cache_seconds: float = DEFAULT_BATCH_INHIBIT_CACHE_SECONDS,
+        batch_activity_hold_seconds: float = DEFAULT_BATCH_ACTIVITY_HOLD_SECONDS,
     ):
         super().__init__(server_address, handler_cls)
         self.client = client
@@ -314,10 +316,16 @@ class WhisperBridgeServer(ThreadingHTTPServer):
             0.0,
             float(batch_inhibit_cache_seconds),
         )
+        self.batch_activity_hold_seconds = max(
+            0.0,
+            float(batch_activity_hold_seconds),
+        )
         self.batch_inhibit_lock = threading.Lock()
         self.batch_inhibit_checked_at = 0.0
         self.batch_inhibit_last = False
         self.batch_inhibit_reason = "unchecked"
+        self.batch_activity_hold_until = 0.0
+        self.batch_activity_hold_reason = "idle"
         self.batch_stop_lock = threading.Lock()
         self.batch_stop_active = False
         self.batch_stop_latched = False
@@ -372,6 +380,10 @@ class WhisperBridgeServer(ThreadingHTTPServer):
         super().server_close()
 
     def stats(self) -> dict:
+        hold_remaining_seconds = max(
+            0.0,
+            self.batch_activity_hold_until - time.monotonic(),
+        )
         with self.stats_lock:
             return {
                 "active_requests": self.active_requests,
@@ -383,6 +395,11 @@ class WhisperBridgeServer(ThreadingHTTPServer):
                 "batch_threshold_seconds": self.batch_threshold_seconds,
                 "batch_inhibited": self.batch_inhibit_last,
                 "batch_inhibit_reason": self.batch_inhibit_reason,
+                "batch_activity_hold_seconds": self.batch_activity_hold_seconds,
+                "batch_activity_hold_remaining_seconds": round(
+                    hold_remaining_seconds,
+                    3,
+                ),
                 "lanes": {
                     lane: {
                         **values,
@@ -410,12 +427,46 @@ class WhisperBridgeServer(ThreadingHTTPServer):
         if rms_dbfs > -78.0 or peak_dbfs > -68.0:
             return True, "program_audio"
 
+        mix = payload.get("mix") or {}
+        for recorder_name in ("da6400", "dn700r"):
+            recorder = mix.get(recorder_name) or {}
+            if bool(recorder.get("is_recording")):
+                return True, f"{recorder_name}_recording"
+            transport = re.sub(
+                r"[^A-Z]",
+                "",
+                str(recorder.get("transport") or recorder.get("status") or "").upper(),
+            )
+            if (
+                transport.startswith("REC")
+                or transport.startswith("RECORD")
+                or transport.startswith("WRIT")
+            ):
+                return True, f"{recorder_name}_recording"
+
         amplifiers = (payload.get("operations") or {}).get("ikon_amplifiers") or []
         for amplifier in amplifiers:
             state = str(amplifier.get("state") or "").lower()
             if amplifier.get("protocol_ok") and state == "operational":
                 return True, "amplifier_operational"
         return False, "idle"
+
+    def _apply_batch_activity_hold(
+        self,
+        inhibited: bool,
+        reason: str,
+        now: float,
+    ) -> tuple[bool, str]:
+        if inhibited and reason != "activity_unavailable":
+            self.batch_activity_hold_until = max(
+                self.batch_activity_hold_until,
+                now + self.batch_activity_hold_seconds,
+            )
+            self.batch_activity_hold_reason = reason
+            return True, reason
+        if not inhibited and now < self.batch_activity_hold_until:
+            return True, f"{self.batch_activity_hold_reason}_hold"
+        return inhibited, reason
 
     def batch_inhibit_state(self) -> tuple[bool, str]:
         if not self.batch_inhibit_url:
@@ -444,9 +495,15 @@ class WhisperBridgeServer(ThreadingHTTPServer):
                 inhibited, reason = self._activity_inhibits_batch(payload)
             except (OSError, ValueError, urllib.error.URLError):
                 inhibited, reason = True, "activity_unavailable"
+            now = time.monotonic()
+            inhibited, reason = self._apply_batch_activity_hold(
+                inhibited,
+                reason,
+                now,
+            )
             self.batch_inhibit_last = inhibited
             self.batch_inhibit_reason = reason
-            self.batch_inhibit_checked_at = time.monotonic()
+            self.batch_inhibit_checked_at = now
             return inhibited, reason
 
     def stop_batch_backend(self) -> None:
@@ -857,6 +914,16 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--batch-activity-hold-seconds",
+        type=float,
+        default=float(
+            os.getenv(
+                "NTC_WHISPER_BATCH_ACTIVITY_HOLD_SECONDS",
+                str(DEFAULT_BATCH_ACTIVITY_HOLD_SECONDS),
+            )
+        ),
+    )
+    parser.add_argument(
         "--model",
         default=os.getenv("NTC_WHISPER_MODEL", "ggml-large-v3"),
     )
@@ -966,6 +1033,10 @@ def main() -> int:
         batch_inhibit_cache_seconds=max(
             0.0,
             args.batch_inhibit_cache_seconds,
+        ),
+        batch_activity_hold_seconds=max(
+            0.0,
+            args.batch_activity_hold_seconds,
         ),
     )
     print(

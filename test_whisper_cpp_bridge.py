@@ -233,6 +233,40 @@ class WhisperCppBridgeTests(unittest.TestCase):
             (True, "amplifier_operational"),
         )
 
+    def test_batch_gate_recognizes_active_recording_transport(self):
+        self.assertEqual(
+            self.bridge._activity_inhibits_batch(
+                {"mix": {"da6400": {"transport": "REC-READY"}}}
+            ),
+            (True, "da6400_recording"),
+        )
+        self.assertEqual(
+            self.bridge._activity_inhibits_batch(
+                {"mix": {"dn700r": {"status": "Writing"}}}
+            ),
+            (True, "dn700r_recording"),
+        )
+
+    def test_batch_gate_holds_through_meeting_pauses(self):
+        self.bridge.batch_activity_hold_seconds = 1800
+
+        self.assertEqual(
+            self.bridge._apply_batch_activity_hold(
+                True,
+                "program_audio",
+                100.0,
+            ),
+            (True, "program_audio"),
+        )
+        self.assertEqual(
+            self.bridge._apply_batch_activity_hold(False, "idle", 200.0),
+            (True, "program_audio_hold"),
+        )
+        self.assertEqual(
+            self.bridge._apply_batch_activity_hold(False, "idle", 1900.0),
+            (False, "idle"),
+        )
+
     def test_stats_requires_token(self):
         with self.assertRaises(urllib.error.HTTPError) as raised:
             self._request("/stats", token=False)
@@ -330,6 +364,7 @@ class WhisperCppBridgeTests(unittest.TestCase):
             unit,
         )
         self.assertIn("--batch-inhibit-cache-seconds 1", unit)
+        self.assertIn("--batch-activity-hold-seconds 1800", unit)
         self.assertIn("--max-queued-requests 2", unit)
         self.assertIn("--max-batch-queued-requests 1", unit)
         self.assertIn(
