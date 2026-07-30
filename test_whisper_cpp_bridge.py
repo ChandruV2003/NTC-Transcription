@@ -253,7 +253,7 @@ class WhisperCppBridgeTests(unittest.TestCase):
             backend_url=f"http://127.0.0.1:{backend_port}/inference",
             backend_timeout_seconds=2,
             model="ggml-large-v3",
-            device="vulkan:0",
+            device="vulkan:1",
             managed_service="ntc-whisper-cpp-backend.service",
             conflicting_service="ntc-agent-llm.service",
             service_idle_seconds=0,
@@ -278,7 +278,7 @@ class WhisperCppBridgeTests(unittest.TestCase):
             ],
         )
 
-    def test_batch_backend_unit_uses_display_gpu_and_conflicts_with_agent(self):
+    def test_batch_backend_unit_uses_compute_gpu_and_conflicts_with_agent(self):
         unit = (
             Path(__file__).resolve().parent
             / "ops/linux/ntc-whisper-cpp-backend.service"
@@ -286,8 +286,9 @@ class WhisperCppBridgeTests(unittest.TestCase):
 
         self.assertIn("ExecStartPre=", unit)
         self.assertIn("vulkaninfo --summary", unit)
-        self.assertIn('"^GPU0:"', unit)
+        self.assertIn('"^GPU1:"', unit)
         self.assertIn('"deviceName.*AMD Radeon"', unit)
+        self.assertIn("-dev 1", unit)
         self.assertIn("Conflicts=ntc-agent-llm.service", unit)
         self.assertIn("TimeoutStartSec=120", unit)
         self.assertNotIn("--convert", unit)
@@ -320,7 +321,7 @@ class WhisperCppBridgeTests(unittest.TestCase):
         self.assertIn("--model ggml-large-v3-turbo", unit)
         self.assertIn("--batch-model ggml-large-v3", unit)
         self.assertIn("--device vulkan:1", unit)
-        self.assertIn("--batch-device vulkan:0", unit)
+        self.assertIn("--batch-device vulkan:1", unit)
         self.assertNotIn(
             "Requires=ntc-whisper-live-backend.service "
             "ntc-whisper-cpp-backend.service",
@@ -340,6 +341,21 @@ class WhisperCppBridgeTests(unittest.TestCase):
         self.assertIn("ggml-large-v3-turbo.bin", live_unit)
         self.assertIn("--port 8769", live_unit)
         self.assertNotIn("--convert", live_unit)
+
+    def test_batch_inhibit_monitor_stops_running_batch_backend(self):
+        with (
+            mock.patch.object(
+                self.bridge,
+                "batch_inhibit_state",
+                return_value=(True, "program_audio"),
+            ),
+            mock.patch.object(self.bridge, "stop_batch_backend") as stop_backend,
+        ):
+            inhibited, reason = self.bridge.enforce_batch_inhibit_once()
+
+        self.assertTrue(inhibited)
+        self.assertEqual(reason, "program_audio")
+        stop_backend.assert_called_once_with()
 
 
 if __name__ == "__main__":

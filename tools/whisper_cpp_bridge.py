@@ -337,6 +337,25 @@ class WhisperBridgeServer(ThreadingHTTPServer):
             for lane in self.lane_limits
         }
         self.started_at = time.time()
+        self.batch_monitor_stop = threading.Event()
+        self.batch_monitor_thread = None
+        if (
+            self.batch_inhibit_url
+            and self.batch_client is not None
+            and self.batch_client.managed
+        ):
+            self.batch_monitor_thread = threading.Thread(
+                target=self._monitor_batch_inhibit,
+                name="batch-inhibit-monitor",
+                daemon=True,
+            )
+            self.batch_monitor_thread.start()
+
+    def server_close(self) -> None:
+        self.batch_monitor_stop.set()
+        if self.batch_monitor_thread is not None:
+            self.batch_monitor_thread.join(timeout=2.0)
+        super().server_close()
 
     def stats(self) -> dict:
         with self.stats_lock:
@@ -434,6 +453,20 @@ class WhisperBridgeServer(ThreadingHTTPServer):
                     self.batch_stop_active = False
 
         threading.Thread(target=stop, daemon=True).start()
+
+    def enforce_batch_inhibit_once(self) -> tuple[bool, str]:
+        inhibited, reason = self.batch_inhibit_state()
+        if inhibited:
+            self.stop_batch_backend()
+        return inhibited, reason
+
+    def _monitor_batch_inhibit(self) -> None:
+        interval_seconds = max(
+            0.25,
+            min(1.0, self.batch_inhibit_cache_seconds or 1.0),
+        )
+        while not self.batch_monitor_stop.wait(interval_seconds):
+            self.enforce_batch_inhibit_once()
 
     def record_rejection(self, lane: str) -> None:
         with self.stats_lock:
