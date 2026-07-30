@@ -98,6 +98,12 @@ yields GPU 0 from the NTC Agent language model, and returns the GPU after 120
 idle seconds. The bridge routes
 requests over 30 seconds, plus explicitly marked refinement requests, to the
 bounded batch lane so recorder processing cannot block rolling speech.
+The coordinator keeps separate live and batch worker URL lists. Live audio uses
+a short freshness queue and publishes complete result blocks immediately;
+refinement work coalesces to the newest pending window instead of accumulating
+stale requests. Public segment responses include capture and publication
+timestamps so end-to-end latency can be measured rather than inferred from the
+display.
 The Apple Silicon M4 Max MacBook worker is retained as fallback capacity only;
 the M4 Mac mini remains dedicated to JVT workloads.
 

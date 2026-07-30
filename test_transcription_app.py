@@ -7,6 +7,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ntc_transcription_app import TranscriptionStore, create_app
+from ntc_transcription_source import (
+    _should_try_next_local_worker,
+    _source_listener_maxsize,
+)
 
 
 def _create_test_db(path: Path):
@@ -173,14 +177,26 @@ def _insert_segment(
     *,
     source: str = "transcriber",
     is_final: bool = True,
+    started_at: str = "",
+    ended_at: str = "",
 ) -> int:
     with sqlite3.connect(path) as connection:
         cursor = connection.execute(
             """
-            INSERT INTO transcript_segments (room_slug, received_at, text, is_final, source)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO transcript_segments (
+                room_slug, started_at, ended_at, received_at, text, is_final, source
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (room_slug, received_at, text, 1 if is_final else 0, source),
+            (
+                room_slug,
+                started_at,
+                ended_at,
+                received_at,
+                text,
+                1 if is_final else 0,
+                source,
+            ),
         )
         return int(cursor.lastrowid)
 
@@ -214,6 +230,39 @@ class TranscriptionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.get_json()["ok"])
 
+    def test_source_listener_queue_is_sized_by_ingest_read_chunks(self):
+        maxsize = _source_listener_maxsize(
+            channels=2,
+            sample_rate_hz=48000,
+            bits_per_sample=24,
+            queue_seconds=6,
+        )
+
+        self.assertEqual(maxsize, 71)
+
+    def test_busy_batch_worker_does_not_fall_through_by_default(self):
+        self.assertFalse(
+            _should_try_next_local_worker(
+                lane="batch",
+                status_code=429,
+                batch_fallback_on_busy=False,
+            )
+        )
+        self.assertTrue(
+            _should_try_next_local_worker(
+                lane="batch",
+                status_code=429,
+                batch_fallback_on_busy=True,
+            )
+        )
+        self.assertTrue(
+            _should_try_next_local_worker(
+                lane="live",
+                status_code=429,
+                batch_fallback_on_busy=False,
+            )
+        )
+
     def test_store_context_closes_database_connection(self):
         store = TranscriptionStore(str(self.db_path))
 
@@ -237,8 +286,9 @@ class TranscriptionTests(unittest.TestCase):
         self.assertIn(b"className = \"block\"", response.data)
         self.assertIn(b"word-reveal", response.data)
         self.assertIn(b"word is-new", response.data)
-        self.assertIn(b'data-word-delay-ms="64"', response.data)
-        self.assertIn(b'data-word-delay-cap-ms="2400"', response.data)
+        self.assertIn(b'data-poll-ms="250"', response.data)
+        self.assertIn(b'data-word-delay-ms="0"', response.data)
+        self.assertIn(b'data-word-delay-cap-ms="0"', response.data)
         self.assertIn(b"function appendSegments", response.data)
         self.assertIn(b"animatedIds.add(id)", response.data)
         self.assertIn(b"wordDelayMs", response.data)
@@ -890,10 +940,11 @@ class TranscriptionTests(unittest.TestCase):
     def test_local_http_transcription_falls_back_to_second_url(self):
         import ntc_transcription_source
 
-        self.app.config["NTC_TRANSCRIPTION_LOCAL_URLS"] = (
+        self.app.config["NTC_TRANSCRIPTION_LOCAL_LIVE_URLS"] = (
             "http://primary-whisper.test/transcription,"
             "http://backup-whisper.test/transcription"
         )
+        self.app.config["NTC_TRANSCRIPTION_LOCAL_URLS"] = "http://generic-whisper.test/transcription"
         self.app.config["NTC_TRANSCRIPTION_LOCAL_URL"] = "http://legacy-whisper.test/transcription"
         with sqlite3.connect(self.db_path) as connection:
             connection.execute("UPDATE rooms SET transcription_enabled = 1 WHERE slug = 'convention-laptop'")
@@ -1105,7 +1156,25 @@ class TranscriptionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertEqual(payload["room_slug"], "room-a")
+        self.assertIn("server_generated_at", payload)
         self.assertEqual([segment["text"] for segment in payload["segments"]], ["Second line."])
+
+    def test_public_api_reports_capture_to_publish_timing(self):
+        _insert_segment(
+            self.db_path,
+            "room-a",
+            "Timed line.",
+            started_at="2026-05-24T20:00:00+00:00",
+            ended_at="2026-05-24T20:00:03.250000+00:00",
+            received_at="2026-05-24T20:00:04+00:00",
+        )
+
+        response = self.client.get("/api/public/transcription/room-a/segments")
+
+        self.assertEqual(response.status_code, 200)
+        segment = response.get_json()["segments"][0]
+        self.assertEqual(segment["audio_duration_ms"], 3250)
+        self.assertEqual(segment["end_to_publish_ms"], 750)
 
     def test_public_api_skips_refined_second_pass_rows(self):
         first_id = _insert_segment(self.db_path, "room-a", "First fast line.", received_at="2026-05-24T20:00:00+00:00")

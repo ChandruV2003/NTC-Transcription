@@ -27,7 +27,6 @@ except ImportError:  # pragma: no cover - Python 3.13+ may not ship audioop
     audioop = None
 
 
-INGEST_CHUNK_SIZE = 3072
 SOURCE_INGEST_READ_SIZE = 24576
 RECENT_CHUNK_BACKLOG = 96
 TRANSCRIPTION_STREAM_PROFILE = {
@@ -43,6 +42,16 @@ STREAM_PROFILES = {
         "bits_per_sample": 24,
     }
 }
+
+
+def _should_try_next_local_worker(
+    *,
+    lane: str,
+    status_code: int,
+    batch_fallback_on_busy: bool,
+) -> bool:
+    return lane != "batch" or status_code != 429 or batch_fallback_on_busy
+
 
 BROWSER_CAPTURE_STREAM_PROFILE = "browser_pcm16"
 BROWSER_CAPTURE_TEMPLATE = """
@@ -905,6 +914,26 @@ def _align_pcm16_byte_count(byte_count: int) -> int:
     return max(0, int(byte_count) - (int(byte_count) % 2))
 
 
+def _source_listener_maxsize(
+    *,
+    channels: int,
+    sample_rate_hz: int,
+    bits_per_sample: int,
+    queue_seconds: float,
+) -> int:
+    source_bytes_per_second = (
+        max(1, int(channels))
+        * max(8000, int(sample_rate_hz))
+        * max(1, int(bits_per_sample) // 8)
+    )
+    bounded_seconds = max(1.0, float(queue_seconds))
+    needed_chunks = math.ceil(
+        (source_bytes_per_second * bounded_seconds)
+        / float(SOURCE_INGEST_READ_SIZE)
+    )
+    return max(8, min(4096, int(needed_chunks)))
+
+
 def _transcription_overlap_byte_count(*, cut_position: int, bytes_per_second: int, overlap_seconds: float, force: bool = False) -> int:
     if force or overlap_seconds <= 0:
         return 0
@@ -1159,8 +1188,13 @@ def install_source_api(app, transcription_store) -> None:
             return "local"
         return "gpt-4o-mini-transcribe"
 
-    def local_urls() -> list[str]:
-        raw_urls = [
+    def local_urls(lane: str = "live") -> list[str]:
+        lane_key = "BATCH" if lane == "batch" else "LIVE"
+        lane_urls = [
+            app.config.get(f"NTC_TRANSCRIPTION_LOCAL_{lane_key}_URLS"),
+            app.config.get(f"NTC_TRANSCRIPTION_LOCAL_{lane_key}_URL"),
+        ]
+        raw_urls = lane_urls if any(str(value or "").strip() for value in lane_urls) else [
             app.config.get("NTC_TRANSCRIPTION_LOCAL_URLS"),
             app.config.get("NTC_TRANSCRIPTION_LOCAL_URL"),
         ]
@@ -1172,13 +1206,13 @@ def install_source_api(app, transcription_store) -> None:
                     urls.append(url)
         return urls
 
-    def local_url() -> str:
-        urls = local_urls()
+    def local_url(lane: str = "live") -> str:
+        urls = local_urls(lane)
         return urls[0] if urls else ""
 
     def provider_ready(current_provider: str) -> bool:
         if current_provider == "local_http":
-            return bool(local_url())
+            return bool(local_url("live"))
         if current_provider == "local_cmd":
             return _config_enabled(app, "NTC_TRANSCRIPTION_ALLOW_LOCAL_COMMAND") and bool(app.config.get("NTC_TRANSCRIPTION_LOCAL_COMMAND"))
         if current_provider == "telnyx":
@@ -1200,10 +1234,13 @@ def install_source_api(app, transcription_store) -> None:
 
     def listener_maxsize(snapshot: dict | None = None) -> int:
         descriptor = stream_descriptor(snapshot)
-        source_bytes_per_second = descriptor["channels"] * descriptor["sample_rate_hz"] * max(1, descriptor["bits_per_sample"] // 8)
-        queue_seconds = max(5.0, float(app.config.get("NTC_TRANSCRIPTION_QUEUE_SECONDS", 120.0)))
-        needed_chunks = math.ceil((source_bytes_per_second * queue_seconds) / float(INGEST_CHUNK_SIZE))
-        return max(128, min(65536, int(needed_chunks)))
+        queue_seconds = max(1.0, float(app.config.get("NTC_TRANSCRIPTION_QUEUE_SECONDS", 6.0)))
+        return _source_listener_maxsize(
+            channels=descriptor["channels"],
+            sample_rate_hz=descriptor["sample_rate_hz"],
+            bits_per_sample=descriptor["bits_per_sample"],
+            queue_seconds=queue_seconds,
+        )
 
     def transcribe_audio_chunk_local_http(
         wav_bytes: bytes,
@@ -1213,7 +1250,7 @@ def install_source_api(app, transcription_store) -> None:
         language: str,
         lane: str,
     ) -> tuple[str, dict]:
-        urls = local_urls()
+        urls = local_urls(lane)
         if not urls:
             raise RuntimeError("local transcription URL is not configured")
         fallback_timeout_seconds = max(
@@ -1267,6 +1304,16 @@ def install_source_api(app, transcription_store) -> None:
                 )
                 if response.status_code >= 400:
                     failures.append(f"{url}: HTTP {response.status_code} {response.text[:160]}")
+                    if not _should_try_next_local_worker(
+                        lane=lane,
+                        status_code=response.status_code,
+                        batch_fallback_on_busy=_config_enabled(
+                            app,
+                            "NTC_TRANSCRIPTION_BATCH_FALLBACK_ON_BUSY",
+                            default=False,
+                        ),
+                    ):
+                        break
                     continue
                 try:
                     payload = response.json()
@@ -1372,7 +1419,8 @@ def install_source_api(app, transcription_store) -> None:
         refined_min_seconds = max(target_seconds, float(app.config.get("NTC_TRANSCRIPTION_REFINED_MIN_SECONDS", 8.0)))
         refined_min_seconds = min(refined_min_seconds, refined_window_seconds)
         refined_prompt_chars = max(0, int(app.config.get("NTC_TRANSCRIPTION_REFINED_PROMPT_CHARS", 320)))
-        refined_queue_size = max(1, int(app.config.get("NTC_TRANSCRIPTION_REFINED_QUEUE_SIZE", 2)))
+        live_prompt_chars = max(0, int(app.config.get("NTC_TRANSCRIPTION_LIVE_PROMPT_CHARS", 320)))
+        refined_queue_size = max(1, int(app.config.get("NTC_TRANSCRIPTION_REFINED_QUEUE_SIZE", 1)))
         bytes_per_second = TRANSCRIPTION_STREAM_PROFILE["sample_rate_hz"] * 2
         flush_floor_seconds = min(2.0, max(1.0, min_chunk_seconds))
         pcm_buffer = bytearray()
@@ -1464,7 +1512,25 @@ def install_source_api(app, transcription_store) -> None:
             try:
                 refined_jobs.put_nowait((payload, segment_started_at, segment_ended_at))
             except queue.Full:
-                app.logger.warning("dropping refined transcription job room_slug=%s reason=queue-full", state.room_slug)
+                try:
+                    stale_job = refined_jobs.get_nowait()
+                except queue.Empty:
+                    stale_job = None
+                else:
+                    refined_jobs.task_done()
+                if stale_job is refined_stop:
+                    return
+                try:
+                    refined_jobs.put_nowait((payload, segment_started_at, segment_ended_at))
+                    app.logger.warning(
+                        "coalescing refined transcription job room_slug=%s reason=queue-full",
+                        state.room_slug,
+                    )
+                except queue.Full:
+                    app.logger.warning(
+                        "dropping refined transcription job room_slug=%s reason=queue-full",
+                        state.room_slug,
+                    )
 
         def flush_refined_buffer(*, force: bool = False):
             nonlocal refined_buffer, refined_started_at
@@ -1545,11 +1611,14 @@ def install_source_api(app, transcription_store) -> None:
                 ),
                 current_provider=current_provider,
                 current_model=current_model,
+                prompt_context=previous_transcript_text[-live_prompt_chars:] if live_prompt_chars else "",
             )
+            published_at = datetime.now(timezone.utc)
             app.logger.info(
                 "transcription inference room_slug=%s host_slug=%s "
                 "lane=live model=%s device=%s audio_seconds=%s "
-                "inference_seconds=%s queue_wait_seconds=%s",
+                "inference_seconds=%s queue_wait_seconds=%s "
+                "end_to_publish_seconds=%.3f start_to_publish_seconds=%.3f",
                 state.room_slug,
                 state.host_slug,
                 inference.get("model") or current_model,
@@ -1557,6 +1626,8 @@ def install_source_api(app, transcription_store) -> None:
                 inference.get("audio_seconds") or "",
                 inference.get("inference_seconds") or "",
                 inference.get("queue_wait_seconds") or "",
+                max(0.0, (published_at - segment_ended_at).total_seconds()),
+                max(0.0, (published_at - segment_started_at).total_seconds()),
             )
             suppress_pattern = (app.config.get("NTC_TRANSCRIPTION_SUPPRESS_REGEX") or "").strip()
             if not text or _transcription_matches_suppressed_pattern(text, suppress_pattern):
@@ -1564,7 +1635,7 @@ def install_source_api(app, transcription_store) -> None:
             text = _trim_overlapped_transcript_prefix(previous_transcript_text, text)
             if not text or _transcription_matches_suppressed_pattern(text, suppress_pattern):
                 return
-            received_at = _utc_now()
+            received_at = published_at.isoformat()
             segment_id = transcription_store.record_transcript_segment(
                 state.room_slug,
                 host_slug=state.host_slug,

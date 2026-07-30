@@ -406,9 +406,11 @@ class TranscriptionStore:
         with self._connect(readonly=True) as connection:
             columns = self._table_columns(connection, "transcript_segments")
             source_filter_sql, source_filter_params = self._display_source_filter(columns)
+            started_at_expr = "started_at" if "started_at" in columns else "'' AS started_at"
+            ended_at_expr = "ended_at" if "ended_at" in columns else "'' AS ended_at"
             rows = connection.execute(
                 f"""
-                SELECT id, room_slug, received_at, text, is_final
+                SELECT id, room_slug, {started_at_expr}, {ended_at_expr}, received_at, text, is_final
                 FROM transcript_segments
                 WHERE room_slug = ?
                   {source_filter_sql}
@@ -423,9 +425,11 @@ class TranscriptionStore:
         with self._connect(readonly=True) as connection:
             columns = self._table_columns(connection, "transcript_segments")
             source_filter_sql, source_filter_params = self._display_source_filter(columns)
+            started_at_expr = "started_at" if "started_at" in columns else "'' AS started_at"
+            ended_at_expr = "ended_at" if "ended_at" in columns else "'' AS ended_at"
             rows = connection.execute(
                 f"""
-                SELECT id, room_slug, received_at, text, is_final
+                SELECT id, room_slug, {started_at_expr}, {ended_at_expr}, received_at, text, is_final
                 FROM transcript_segments
                 WHERE room_slug = ?
                   AND id > ?
@@ -1319,13 +1323,33 @@ def _dedupe_list(values) -> list[str]:
 
 
 def _segment_payload(row: sqlite3.Row) -> dict:
-    return {
+    keys = set(row.keys())
+    started_at = row["started_at"] if "started_at" in keys else ""
+    ended_at = row["ended_at"] if "ended_at" in keys else ""
+    received_at = row["received_at"]
+    payload = {
         "id": int(row["id"]),
         "room_slug": row["room_slug"],
-        "received_at": row["received_at"],
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "received_at": received_at,
         "text": row["text"],
         "is_final": bool(row["is_final"]),
     }
+    started = _parse_iso_datetime(started_at)
+    ended = _parse_iso_datetime(ended_at)
+    received = _parse_iso_datetime(received_at)
+    if started and ended:
+        payload["audio_duration_ms"] = max(
+            0,
+            round((ended - started).total_seconds() * 1000),
+        )
+    if ended and received:
+        payload["end_to_publish_ms"] = max(
+            0,
+            round((received - ended).total_seconds() * 1000),
+        )
+    return payload
 
 
 def _parse_iso_datetime(value: str | None) -> datetime | None:
@@ -1375,18 +1399,23 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
         NTC_TRANSCRIPTION_TITLE=os.getenv("NTC_TRANSCRIPTION_TITLE", "NTC Transcription"),
         NTC_TRANSCRIPTION_DEFAULT_ROOM=os.getenv("NTC_TRANSCRIPTION_DEFAULT_ROOM", "room-a"),
         NTC_TRANSCRIPTION_VISIBLE_ROOMS=os.getenv("NTC_TRANSCRIPTION_VISIBLE_ROOMS", "room-a,room-b"),
-        NTC_TRANSCRIPTION_POLL_MS=int(os.getenv("NTC_TRANSCRIPTION_POLL_MS", "1000")),
+        NTC_TRANSCRIPTION_POLL_MS=int(os.getenv("NTC_TRANSCRIPTION_POLL_MS", "250")),
         NTC_TRANSCRIPTION_INITIAL_LINES=int(os.getenv("NTC_TRANSCRIPTION_INITIAL_LINES", "30")),
         NTC_TRANSCRIPTION_API_LINES=int(os.getenv("NTC_TRANSCRIPTION_API_LINES", "80")),
         NTC_TRANSCRIPTION_RENDER_LINES=int(os.getenv("NTC_TRANSCRIPTION_RENDER_LINES", "48")),
-        NTC_TRANSCRIPTION_WORD_DELAY_MS=int(os.getenv("NTC_TRANSCRIPTION_WORD_DELAY_MS", "64")),
-        NTC_TRANSCRIPTION_WORD_DELAY_CAP_MS=int(os.getenv("NTC_TRANSCRIPTION_WORD_DELAY_CAP_MS", "2400")),
+        NTC_TRANSCRIPTION_WORD_DELAY_MS=int(os.getenv("NTC_TRANSCRIPTION_WORD_DELAY_MS", "0")),
+        NTC_TRANSCRIPTION_WORD_DELAY_CAP_MS=int(os.getenv("NTC_TRANSCRIPTION_WORD_DELAY_CAP_MS", "0")),
         NTC_TRANSCRIPTION_SOURCE_PUBLIC_BASE_URL=os.getenv("NTC_TRANSCRIPTION_SOURCE_PUBLIC_BASE_URL", ""),
         NTC_TRANSCRIPTION_HARD_DISABLED=os.getenv("NTC_TRANSCRIPTION_HARD_DISABLED", "0"),
         NTC_TRANSCRIPTION_PROVIDER=os.getenv("NTC_TRANSCRIPTION_PROVIDER", "openai"),
         NTC_TRANSCRIPTION_MODEL=os.getenv("NTC_TRANSCRIPTION_MODEL", ""),
         NTC_TRANSCRIPTION_LOCAL_URL=os.getenv("NTC_TRANSCRIPTION_LOCAL_URL", ""),
         NTC_TRANSCRIPTION_LOCAL_URLS=os.getenv("NTC_TRANSCRIPTION_LOCAL_URLS", ""),
+        NTC_TRANSCRIPTION_LOCAL_LIVE_URL=os.getenv("NTC_TRANSCRIPTION_LOCAL_LIVE_URL", ""),
+        NTC_TRANSCRIPTION_LOCAL_LIVE_URLS=os.getenv("NTC_TRANSCRIPTION_LOCAL_LIVE_URLS", ""),
+        NTC_TRANSCRIPTION_LOCAL_BATCH_URL=os.getenv("NTC_TRANSCRIPTION_LOCAL_BATCH_URL", ""),
+        NTC_TRANSCRIPTION_LOCAL_BATCH_URLS=os.getenv("NTC_TRANSCRIPTION_LOCAL_BATCH_URLS", ""),
+        NTC_TRANSCRIPTION_BATCH_FALLBACK_ON_BUSY=os.getenv("NTC_TRANSCRIPTION_BATCH_FALLBACK_ON_BUSY", "0"),
         NTC_TRANSCRIPTION_LOCAL_COMMAND=os.getenv("NTC_TRANSCRIPTION_LOCAL_COMMAND", ""),
         NTC_TRANSCRIPTION_ALLOW_LOCAL_COMMAND=os.getenv("NTC_TRANSCRIPTION_ALLOW_LOCAL_COMMAND", "0"),
         NTC_TRANSCRIPTION_CHUNK_SECONDS=float(os.getenv("NTC_TRANSCRIPTION_CHUNK_SECONDS", "3.2")),
@@ -1397,8 +1426,9 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
         NTC_TRANSCRIPTION_REFINED_WINDOW_SECONDS=float(os.getenv("NTC_TRANSCRIPTION_REFINED_WINDOW_SECONDS", "14.0")),
         NTC_TRANSCRIPTION_REFINED_MIN_SECONDS=float(os.getenv("NTC_TRANSCRIPTION_REFINED_MIN_SECONDS", "8.0")),
         NTC_TRANSCRIPTION_REFINED_PROMPT_CHARS=int(os.getenv("NTC_TRANSCRIPTION_REFINED_PROMPT_CHARS", "320")),
-        NTC_TRANSCRIPTION_REFINED_QUEUE_SIZE=int(os.getenv("NTC_TRANSCRIPTION_REFINED_QUEUE_SIZE", "2")),
-        NTC_TRANSCRIPTION_QUEUE_SECONDS=float(os.getenv("NTC_TRANSCRIPTION_QUEUE_SECONDS", "120.0")),
+        NTC_TRANSCRIPTION_REFINED_QUEUE_SIZE=int(os.getenv("NTC_TRANSCRIPTION_REFINED_QUEUE_SIZE", "1")),
+        NTC_TRANSCRIPTION_LIVE_PROMPT_CHARS=int(os.getenv("NTC_TRANSCRIPTION_LIVE_PROMPT_CHARS", "320")),
+        NTC_TRANSCRIPTION_QUEUE_SECONDS=float(os.getenv("NTC_TRANSCRIPTION_QUEUE_SECONDS", "6.0")),
         NTC_TRANSCRIPTION_BROWSER_CAPTURE_STALE_SECONDS=float(os.getenv("NTC_TRANSCRIPTION_BROWSER_CAPTURE_STALE_SECONDS", "8.0")),
         NTC_TRANSCRIPTION_BROWSER_CAPTURE_MAX_CHUNK_BYTES=int(os.getenv("NTC_TRANSCRIPTION_BROWSER_CAPTURE_MAX_CHUNK_BYTES", "524288")),
         NTC_TRANSCRIPTION_SCHEDULER_ENABLED=os.getenv("NTC_TRANSCRIPTION_SCHEDULER_ENABLED", "1"),
@@ -1862,7 +1892,13 @@ def create_app(test_config: dict | None = None, *, store: TranscriptionStore | N
             segments = list(reversed(recent_segments))
         else:
             segments = transcription_store.list_segments_after(room["slug"], after_id=after_id, limit=limit)
-        return jsonify({"room_slug": room["slug"], "segments": segments})
+        return jsonify(
+            {
+                "room_slug": room["slug"],
+                "server_generated_at": datetime.now(timezone.utc).isoformat(),
+                "segments": segments,
+            }
+        )
 
     return app
 
@@ -3756,10 +3792,10 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
         const transcript = document.getElementById("transcript");
         if (!transcript) return;
         const roomSlug = transcript.dataset.roomSlug;
-        const pollMs = Number(transcript.dataset.pollMs || "1000");
+        const pollMs = Number(transcript.dataset.pollMs || "250");
         const renderBlocks = Math.max(8, Math.ceil(Number(transcript.dataset.renderLines || "48")));
-        const wordDelayMs = Math.max(0, Number(transcript.dataset.wordDelayMs || "64"));
-        const wordDelayCapMs = Math.max(0, Number(transcript.dataset.wordDelayCapMs || "2400"));
+        const wordDelayMs = Math.max(0, Number(transcript.dataset.wordDelayMs || "0"));
+        const wordDelayCapMs = Math.max(0, Number(transcript.dataset.wordDelayCapMs || "0"));
         const initialSegments = JSON.parse(document.getElementById("initial-segments")?.textContent || "[]");
         const segments = [];
         const seen = new Set();
@@ -3830,9 +3866,10 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
               continue;
             }
             const word = document.createElement("span");
-            word.className = animate ? "word is-new" : "word";
+            const revealWord = animate && wordDelayMs > 0 && wordDelayCapMs > 0;
+            word.className = revealWord ? "word is-new" : "word";
             word.textContent = part;
-            if (animate) {
+            if (revealWord) {
               word.style.setProperty("--word-delay", `${Math.min(delayState.index * wordDelayMs, wordDelayCapMs)}ms`);
               delayState.index += 1;
             }
@@ -3892,11 +3929,11 @@ PUBLIC_TRANSCRIBE_TEMPLATE = """
               appendSegments(payload.segments || []);
             }
           } finally {
-            window.setTimeout(poll, Math.max(500, pollMs));
+            window.setTimeout(poll, Math.max(100, pollMs));
           }
         }
 
-        window.setTimeout(poll, Math.max(500, pollMs));
+        window.setTimeout(poll, Math.max(100, pollMs));
       })();
     </script>
   </body>
