@@ -31,6 +31,7 @@ DEFAULT_BATCH_BACKEND_TIMEOUT_SECONDS = 300.0
 DEFAULT_BATCH_START_TIMEOUT_SECONDS = 45.0
 DEFAULT_BATCH_IDLE_SECONDS = 120.0
 DEFAULT_BATCH_INHIBIT_CACHE_SECONDS = 1.0
+DEFAULT_BATCH_INHIBIT_TIMEOUT_SECONDS = 3.0
 DEFAULT_BATCH_ACTIVITY_HOLD_SECONDS = 1800.0
 SYSTEMD_SERVICE_PATTERN = re.compile(r"^[A-Za-z0-9_.@:-]+\.service$")
 
@@ -291,6 +292,7 @@ class WhisperBridgeServer(ThreadingHTTPServer):
         batch_queue_timeout_seconds: float = DEFAULT_BATCH_QUEUE_TIMEOUT_SECONDS,
         batch_inhibit_url: str = "",
         batch_inhibit_cache_seconds: float = DEFAULT_BATCH_INHIBIT_CACHE_SECONDS,
+        batch_inhibit_timeout_seconds: float = DEFAULT_BATCH_INHIBIT_TIMEOUT_SECONDS,
         batch_activity_hold_seconds: float = DEFAULT_BATCH_ACTIVITY_HOLD_SECONDS,
     ):
         super().__init__(server_address, handler_cls)
@@ -315,6 +317,10 @@ class WhisperBridgeServer(ThreadingHTTPServer):
         self.batch_inhibit_cache_seconds = max(
             0.0,
             float(batch_inhibit_cache_seconds),
+        )
+        self.batch_inhibit_timeout_seconds = max(
+            0.1,
+            float(batch_inhibit_timeout_seconds),
         )
         self.batch_activity_hold_seconds = max(
             0.0,
@@ -489,7 +495,7 @@ class WhisperBridgeServer(ThreadingHTTPServer):
             try:
                 with urllib.request.urlopen(
                     self.batch_inhibit_url,
-                    timeout=1.0,
+                    timeout=self.batch_inhibit_timeout_seconds,
                 ) as response:
                     payload = json.loads(response.read().decode("utf-8"))
                 inhibited, reason = self._activity_inhibits_batch(payload)
@@ -914,6 +920,16 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--batch-inhibit-timeout-seconds",
+        type=float,
+        default=float(
+            os.getenv(
+                "NTC_WHISPER_BATCH_INHIBIT_TIMEOUT_SECONDS",
+                str(DEFAULT_BATCH_INHIBIT_TIMEOUT_SECONDS),
+            )
+        ),
+    )
+    parser.add_argument(
         "--batch-activity-hold-seconds",
         type=float,
         default=float(
@@ -1033,6 +1049,10 @@ def main() -> int:
         batch_inhibit_cache_seconds=max(
             0.0,
             args.batch_inhibit_cache_seconds,
+        ),
+        batch_inhibit_timeout_seconds=max(
+            0.1,
+            args.batch_inhibit_timeout_seconds,
         ),
         batch_activity_hold_seconds=max(
             0.0,
