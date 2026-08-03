@@ -91,11 +91,13 @@ song/lyric matching, or explicit model fine-tuning.
 ## Local Whisper Workers
 
 The Ubuntu Mac Pro whisper.cpp/Vulkan worker is the primary NTC inference host.
-Measured performance reserves Vulkan GPU 1 for the low-latency
-`large-v3-turbo` live lane and Vulkan GPU 0 for full `large-v3` recorder and
-refinement work. The full model wakes on the first batch request, temporarily
-yields GPU 0 from the NTC Agent language model, and returns the GPU after 120
-idle seconds. The bridge routes
+Measured performance reserves Vulkan GPU 1 for Whisper work. Both the
+low-latency live lane and the separately bounded recorder lane use
+`large-v3-turbo`; the full `large-v3` model cannot finish the recorder's
+four-minute windows before the caller timeout on this hardware. The managed
+batch worker wakes on the first batch request, temporarily yields its GPU from
+the NTC Agent language model, and returns the GPU after 120 idle seconds. The
+bridge routes
 requests over 30 seconds, plus explicitly marked refinement requests, to the
 bounded batch lane so recorder processing cannot block rolling speech.
 The coordinator keeps separate live and batch worker URL lists. Live audio uses

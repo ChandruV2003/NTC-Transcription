@@ -32,7 +32,7 @@ DEFAULT_BATCH_START_TIMEOUT_SECONDS = 45.0
 DEFAULT_BATCH_IDLE_SECONDS = 120.0
 DEFAULT_BATCH_INHIBIT_CACHE_SECONDS = 1.0
 DEFAULT_BATCH_INHIBIT_TIMEOUT_SECONDS = 3.0
-DEFAULT_BATCH_ACTIVITY_HOLD_SECONDS = 1800.0
+DEFAULT_BATCH_ACTIVITY_HOLD_SECONDS = 0.0
 SYSTEMD_SERVICE_PATTERN = re.compile(r"^[A-Za-z0-9_.@:-]+\.service$")
 
 
@@ -46,6 +46,28 @@ def _wav_duration_seconds(wav_bytes: bytes) -> float:
         if frame_rate <= 0:
             return 0.0
         return wav_file.getnframes() / float(frame_rate)
+
+
+def _strip_prompt_echo(text: str, prompt: str) -> str:
+    value = str(text or "").strip()
+    prompt_words = re.findall(r"[a-z0-9']+", str(prompt or "").lower())
+    value_words = re.findall(r"[a-z0-9']+", value.lower())
+    ngram_size = 5
+    if len(prompt_words) < ngram_size or len(value_words) < ngram_size:
+        return value
+
+    prompt_ngrams = {
+        tuple(prompt_words[index : index + ngram_size])
+        for index in range(len(prompt_words) - ngram_size + 1)
+    }
+    covered: set[int] = set()
+    for index in range(len(value_words) - ngram_size + 1):
+        if tuple(value_words[index : index + ngram_size]) in prompt_ngrams:
+            covered.update(range(index, index + ngram_size))
+
+    if len(covered) / len(value_words) >= 0.8:
+        return ""
+    return value
 
 
 def _multipart_body(
@@ -261,7 +283,10 @@ class WhisperCppClient:
                 ) as response:
                     payload = json.loads(response.read().decode("utf-8"))
                 return {
-                    "text": str(payload.get("text") or "").strip(),
+                    "text": _strip_prompt_echo(
+                        str(payload.get("text") or ""),
+                        prompt,
+                    ),
                     "inference_seconds": round(
                         time.monotonic() - started_at,
                         3,
@@ -418,43 +443,22 @@ class WhisperBridgeServer(ThreadingHTTPServer):
 
     @staticmethod
     def _activity_inhibits_batch(payload: dict) -> tuple[bool, str]:
-        if bool((payload.get("webcall") or {}).get("live")):
-            return True, "webcall_live"
-
-        analysis = ((payload.get("mix") or {}).get("analysis") or {})
-        try:
-            rms_dbfs = float(analysis.get("rms_dbfs"))
-        except (TypeError, ValueError):
-            rms_dbfs = -90.0
-        try:
-            peak_dbfs = float(analysis.get("peak_dbfs"))
-        except (TypeError, ValueError):
-            peak_dbfs = -90.0
-        if rms_dbfs > -78.0 or peak_dbfs > -68.0:
-            return True, "program_audio"
-
-        mix = payload.get("mix") or {}
-        for recorder_name in ("da6400", "dn700r"):
-            recorder = mix.get(recorder_name) or {}
-            if bool(recorder.get("is_recording")):
-                return True, f"{recorder_name}_recording"
-            transport = re.sub(
-                r"[^A-Z]",
-                "",
-                str(recorder.get("transport") or recorder.get("status") or "").upper(),
-            )
+        transcription = payload.get("transcription") or {}
+        room_states = [
+            transcription.get("active"),
+            transcription.get("room_a"),
+            transcription.get("room_b"),
+            transcription.get("room_c"),
+        ]
+        for room_state in room_states:
+            if not isinstance(room_state, dict):
+                continue
             if (
-                transport.startswith("REC")
-                or transport.startswith("RECORD")
-                or transport.startswith("WRIT")
+                room_state.get("configured")
+                and room_state.get("ok")
+                and room_state.get("stale") is False
             ):
-                return True, f"{recorder_name}_recording"
-
-        amplifiers = (payload.get("operations") or {}).get("ikon_amplifiers") or []
-        for amplifier in amplifiers:
-            state = str(amplifier.get("state") or "").lower()
-            if amplifier.get("protocol_ok") and state == "operational":
-                return True, "amplifier_operational"
+                return True, "live_transcription_active"
         return False, "idle"
 
     def _apply_batch_activity_hold(
@@ -756,7 +760,7 @@ class WhisperBridgeHandler(BaseHTTPRequestHandler):
                 result = client.transcribe(
                     wav_bytes,
                     language=language,
-                    prompt=prompt,
+                    prompt="" if lane == "batch" else prompt,
                 )
             except Exception as exc:
                 self.server.record_failure(lane)
@@ -769,6 +773,18 @@ class WhisperBridgeHandler(BaseHTTPRequestHandler):
                     status=503,
                 )
                 return
+
+        if lane == "batch" and not str(result.get("text") or "").strip():
+            self._send_json(
+                {
+                    "error": "no speech recognized in batch audio",
+                    "lane": lane,
+                    "request_id": request_id,
+                    "retryable": False,
+                },
+                status=422,
+            )
+            return
 
         self.server.record_completion(lane)
         result.update(

@@ -1,5 +1,5 @@
 [Unit]
-Description=NTC Whisper.cpp Large-v3 batch backend
+Description=NTC Whisper.cpp Large-v3 Turbo batch backend
 After=network-online.target
 Wants=network-online.target
 Conflicts=ntc-agent-llm.service
@@ -8,7 +8,7 @@ Conflicts=ntc-agent-llm.service
 Type=simple
 WorkingDirectory=%h/benchmarks/whisper.cpp
 ExecStartPre=/bin/sh -c 'until /usr/bin/vulkaninfo --summary 2>/dev/null | /usr/bin/grep -A 8 "^GPU1:" | /usr/bin/grep -q "deviceName.*AMD Radeon"; do /usr/bin/sleep 2; done'
-ExecStart=%h/benchmarks/whisper.cpp/build-macpro-vulkan/bin/whisper-server --host 127.0.0.1 --port 8767 -dev 1 -t 12 -m %h/benchmarks/whisper.cpp/models/ggml-large-v3.bin --tmp-dir %t/ntc-whisper
+ExecStart=%h/benchmarks/whisper.cpp/build-macpro-vulkan/bin/whisper-server --host 127.0.0.1 --port 8767 -dev 1 -t 12 -m %h/benchmarks/whisper.cpp/models/ggml-large-v3-turbo.bin --tmp-dir %t/ntc-whisper
 Restart=always
 RestartSec=5
 TimeoutStartSec=120

@@ -15,6 +15,7 @@ from tools.whisper_cpp_bridge import (
     WhisperBridgeHandler,
     WhisperBridgeServer,
     WhisperCppClient,
+    _strip_prompt_echo,
 )
 
 
@@ -141,6 +142,35 @@ class WhisperCppBridgeTests(unittest.TestCase):
         self.assertEqual(payload["lane"], "live")
         self.assertGreaterEqual(payload["inference_seconds"], 0)
 
+    def test_prompt_echo_is_removed_before_it_reaches_the_caller(self):
+        prompt = (
+            "Transcribe this NTC Newark church recording clearly. Preserve "
+            "speaker names, scripture references, sermon titles, testimony "
+            "introductions, and whether this sounds like a personal testimony "
+            "or a preached message."
+        )
+        echoed = (
+            "testimony introductions, and whether this sounds like a\n"
+            "personal testimony or a preached message.\n"
+            "testimony introductions, and whether this sounds like a\n"
+            "personal testimony or a preached message."
+        )
+
+        self.assertEqual(_strip_prompt_echo(echoed, prompt), "")
+
+    def test_real_transcript_with_a_few_prompt_words_is_preserved(self):
+        prompt = (
+            "Preserve speaker names, scripture references, sermon titles, "
+            "testimony introductions, and whether this sounds like a personal "
+            "testimony or a preached message."
+        )
+        transcript = (
+            "Praise the Lord. My name is Kevin, and I want to thank God for "
+            "helping me through school this year."
+        )
+
+        self.assertEqual(_strip_prompt_echo(transcript, prompt), transcript)
+
     def test_long_audio_routes_to_bounded_batch_lane(self):
         status, payload = self._request(
             "/transcription?language=en",
@@ -165,12 +195,51 @@ class WhisperCppBridgeTests(unittest.TestCase):
         self.assertEqual(payload["audio_seconds"], 2.0)
         self.assertEqual(payload["lane"], "batch")
 
-    def test_batch_is_deferred_when_webcall_is_live(self):
+    def test_batch_lane_does_not_forward_instruction_prompt(self):
+        with mock.patch.object(
+            self.bridge.batch_client,
+            "transcribe",
+            return_value={"text": "Real speech.", "inference_seconds": 0.1},
+        ) as transcribe:
+            status, payload = self._request(
+                "/transcription?language=en&lane=batch&prompt=classify+this+audio",
+                data=_wav_bytes(2.0),
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["text"], "Real speech.")
+        transcribe.assert_called_once_with(
+            mock.ANY,
+            language="en",
+            prompt="",
+        )
+
+    def test_empty_batch_transcript_is_a_terminal_analysis_result(self):
+        with (
+            mock.patch.object(
+                self.bridge.batch_client,
+                "transcribe",
+                return_value={"text": "", "inference_seconds": 0.1},
+            ),
+            self.assertRaises(urllib.error.HTTPError) as raised,
+        ):
+            self._request(
+                "/transcription?language=en&lane=batch",
+                data=_wav_bytes(2.0),
+            )
+
+        self.assertEqual(raised.exception.code, 422)
+        payload = json.loads(raised.exception.read())
+        self.assertEqual(payload["error"], "no speech recognized in batch audio")
+        self.assertFalse(payload["retryable"])
+        raised.exception.close()
+
+    def test_batch_is_deferred_when_live_transcription_is_active(self):
         with (
             mock.patch.object(
                 self.bridge,
                 "batch_inhibit_state",
-                return_value=(True, "webcall_live"),
+                return_value=(True, "live_transcription_active"),
             ),
             self.assertRaises(urllib.error.HTTPError) as raised,
         ):
@@ -182,7 +251,7 @@ class WhisperCppBridgeTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 429)
         payload = json.loads(raised.exception.read())
         self.assertEqual(payload["lane"], "batch")
-        self.assertEqual(payload["reason"], "webcall_live")
+        self.assertEqual(payload["reason"], "live_transcription_active")
         self.assertTrue(payload["retryable"])
         raised.exception.close()
 
@@ -235,54 +304,73 @@ class WhisperCppBridgeTests(unittest.TestCase):
             timeout=3.5,
         )
 
-    def test_batch_gate_recognizes_program_audio_and_operational_arrays(self):
+    def test_batch_gate_recognizes_live_transcription_only(self):
         self.assertEqual(
             self.bridge._activity_inhibits_batch(
-                {"mix": {"analysis": {"rms_dbfs": -60, "peak_dbfs": -50}}}
+                {
+                    "transcription": {
+                        "active": {
+                            "configured": True,
+                            "ok": True,
+                            "stale": False,
+                        }
+                    }
+                }
             ),
-            (True, "program_audio"),
+            (True, "live_transcription_active"),
         )
         self.assertEqual(
             self.bridge._activity_inhibits_batch(
                 {
+                    "webcall": {"live": True},
+                    "mix": {
+                        "analysis": {"rms_dbfs": -20, "peak_dbfs": -10},
+                        "da6400": {"transport": "RECORD"},
+                    },
                     "operations": {
                         "ikon_amplifiers": [
                             {"protocol_ok": True, "state": "operational"}
                         ]
+                    },
+                    "transcription": {
+                        "active": {
+                            "configured": True,
+                            "ok": True,
+                            "stale": True,
+                        }
+                    },
+                }
+            ),
+            (False, "idle"),
+        )
+
+    def test_batch_gate_checks_all_configured_transcription_rooms(self):
+        self.assertEqual(
+            self.bridge._activity_inhibits_batch(
+                {
+                    "transcription": {
+                        "active": {"configured": True, "ok": True, "stale": True},
+                        "room_b": {"configured": True, "ok": True, "stale": False},
                     }
                 }
             ),
-            (True, "amplifier_operational"),
-        )
-
-    def test_batch_gate_recognizes_active_recording_transport(self):
-        self.assertEqual(
-            self.bridge._activity_inhibits_batch(
-                {"mix": {"da6400": {"transport": "REC-READY"}}}
-            ),
-            (True, "da6400_recording"),
-        )
-        self.assertEqual(
-            self.bridge._activity_inhibits_batch(
-                {"mix": {"dn700r": {"status": "Writing"}}}
-            ),
-            (True, "dn700r_recording"),
+            (True, "live_transcription_active"),
         )
 
     def test_batch_gate_holds_through_meeting_pauses(self):
-        self.bridge.batch_activity_hold_seconds = 1800
+        self.bridge.batch_activity_hold_seconds = 15
 
         self.assertEqual(
             self.bridge._apply_batch_activity_hold(
                 True,
-                "program_audio",
+                "live_transcription_active",
                 100.0,
             ),
-            (True, "program_audio"),
+            (True, "live_transcription_active"),
         )
         self.assertEqual(
             self.bridge._apply_batch_activity_hold(False, "idle", 200.0),
-            (True, "program_audio_hold"),
+            (False, "idle"),
         )
         self.assertEqual(
             self.bridge._apply_batch_activity_hold(False, "idle", 1900.0),
@@ -386,7 +474,7 @@ class WhisperCppBridgeTests(unittest.TestCase):
             unit,
         )
         self.assertIn("--batch-inhibit-cache-seconds 1", unit)
-        self.assertIn("--batch-activity-hold-seconds 1800", unit)
+        self.assertIn("--batch-activity-hold-seconds 0", unit)
         self.assertIn("--max-queued-requests 2", unit)
         self.assertIn("--max-batch-queued-requests 1", unit)
         self.assertIn(
@@ -398,7 +486,7 @@ class WhisperCppBridgeTests(unittest.TestCase):
             unit,
         )
         self.assertIn("--model ggml-large-v3-turbo", unit)
-        self.assertIn("--batch-model ggml-large-v3", unit)
+        self.assertIn("--batch-model ggml-large-v3-turbo", unit)
         self.assertIn("--device vulkan:1", unit)
         self.assertIn("--batch-device vulkan:1", unit)
         self.assertNotIn(
@@ -421,19 +509,26 @@ class WhisperCppBridgeTests(unittest.TestCase):
         self.assertIn("--port 8769", live_unit)
         self.assertNotIn("--convert", live_unit)
 
+        batch_unit = (
+            Path(__file__).resolve().parent
+            / "ops/linux/ntc-whisper-cpp-backend.service"
+        ).read_text(encoding="utf-8")
+        self.assertIn("ggml-large-v3-turbo.bin", batch_unit)
+        self.assertNotIn("ggml-large-v3.bin", batch_unit)
+
     def test_batch_inhibit_monitor_stops_running_batch_backend(self):
         with (
             mock.patch.object(
                 self.bridge,
                 "batch_inhibit_state",
-                return_value=(True, "program_audio"),
+                return_value=(True, "live_transcription_active"),
             ),
             mock.patch.object(self.bridge, "stop_batch_backend") as stop_backend,
         ):
             inhibited, reason = self.bridge.enforce_batch_inhibit_once()
 
         self.assertTrue(inhibited)
-        self.assertEqual(reason, "program_audio")
+        self.assertEqual(reason, "live_transcription_active")
         stop_backend.assert_called_once_with()
 
 
